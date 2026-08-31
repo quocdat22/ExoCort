@@ -249,7 +249,7 @@ flowchart TD
      - **Token Consumption & Estimated Cost**: Thống kê số lượng token input/output và ước tính chi phí API.
 * **Đầu ra (Output)**: **Baseline Performance Report** (Báo cáo đo lường chất lượng hệ thống).
 * **Tiêu chí Hoàn thành (DoD)**:
-  - **Retrieval Recall@5** $\ge$ 70%.
+  - **Retrieval Recall@5** $\ge$ 70% (Mốc Baseline MVP cho Vòng lặp 1).
   - **Faithfulness Score** $\ge$ 85%.
   - **P95 Latency** $\le 2.5s$.
   - Xuất bản tài liệu Báo cáo Baseline hoàn chỉnh.
@@ -280,7 +280,7 @@ flowchart TD
 | **Retrieval & Query** | `query_embedding_timeout` | `2.0s` | HTTP Timeout cho vector hóa câu hỏi người dùng (Fast-Fail) |
 | **Generation (LLM)** | `llm_model` | `deepseek/deepseek-v4-flash-0731` | Mô hình sinh ngôn ngữ tự nhiên qua OpenRouter |
 | **Generation (LLM)** | `llm_temperature` | `0.1` | Thiết lập tính xác thực cao, hạn chế sáng tạo/ảo giác |
-| **Generation (LLM)** | `llm_max_tokens` | `1024` | Độ dài phản hồi tối đa của câu trả lời |
+| **Generation (LLM)** | `llm_max_tokens` | `2048` | Độ dài phản hồi tối đa của câu trả lời (đảm bảo không gian cho câu trả lời dài kèm nhiều trích dẫn) |
 | **Generation (LLM)** | `query_generation_timeout` | `5.0s` | HTTP Timeout cho bước sinh câu trả lời qua LLM |
 | **Query Resilience** | `query_max_retries` | `2` | Số lần thử tối đa cho luồng tương tác realtime (Agile Retry) |
 | **Query Resilience** | `query_total_timeout_budget` | `8.0s` | Ngân sách thời gian tối đa cho toàn bộ lượt truy vấn (Hard Limit) |
@@ -499,6 +499,6 @@ Hệ thống phân tách rạch ròi 2 chính sách Retry & Timeout tương ứn
    - Phân đoạn ngữ nghĩa (Semantic Chunking) theo ranh giới đoạn văn và đề mục sách.
 3. **Vòng lặp 3 (Nâng cấp Tìm kiếm Lai & Tái xếp hạng - Hybrid Search & Reranking)**:
    - Bổ sung chỉ mục từ khóa (BM25 Sparse Index) song song với Jina Dense Vector.
-   - Tích hợp mô hình Reranker (Jina Reranker v2) để nâng cao Recall@5 lên $\ge 85\%$.
+   - Tích hợp mô hình Reranker (Jina Reranker v2) để nâng cao mục tiêu Recall@5 lên $\ge 85\%$ (lưu ý: đây là target cải tiến cho Iteration 3, tách biệt với mốc Baseline $\ge 70\%$ của Phase 4 / Vòng lặp 1).
 4. **Vòng lặp 4 (Truy vấn Tổng hợp Toàn cục - Global Synthesis)**:
    - Hỗ trợ câu hỏi tổng quát toàn bộ cuốn sách hoặc so sánh chéo nhiều sách trong Workspace (Hierarchical Summarization / Map-Reduce RAG).

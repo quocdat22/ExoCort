@@ -193,7 +193,7 @@ class RAGConfig(BaseSettings):
     query_embedding_timeout: float = 2.0
     llm_model: str = "deepseek/deepseek-v4-flash-0731"
     llm_temperature: float = 0.1
-    llm_max_tokens: int = 1024
+    llm_max_tokens: int = 2048
     query_generation_timeout: float = 5.0
     query_max_retries: int = 2
     query_total_timeout_budget: float = 8.0
