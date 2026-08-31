@@ -1,17 +1,18 @@
-# Phase 4: Benchmark & Evaluation Implementation Plan
+# Phase 4: Benchmark & Evaluation Implementation Plan (Managed with uv)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Xây dựng Phase 4 thiết lập hệ thống kiểm thử tự động (Benchmark Engine) đo lường Recall@5, Faithfulness và Latency trên tập dữ liệu Golden Test Set, xuất bản Baseline Performance Report.
+**Goal:** Xây dựng Phase 4 thiết lập hệ thống kiểm thử tự động (Benchmark Engine) đo lường Recall@5, Faithfulness và Latency trên tập dữ liệu Golden Test Set, xuất bản Baseline Performance Report. Quản lý thực thi qua `uv`.
 
-**Architecture:** Nhận `EBookRAGPipeline` từ Phase 3 -> Tự động chạy tập câu hỏi đánh giá theo từng Workspace -> Tính toán tỷ lệ Recall@5 trang trích dẫn và Faithfulness câu trả lời -> So sánh với ngưỡng chất lượng (Recall $\ge 70\%$, Faithfulness $\ge 85\%$) -> Xuất báo cáo hiệu năng.
+**Architecture:** Nhận `EBookRAGPipeline` từ Phase 3 -> Tự động chạy tập câu hỏi đánh giá theo từng Workspace qua `uv run` -> Tính toán tỷ lệ Recall@5 trang trích dẫn và Faithfulness câu trả lời -> So sánh với ngưỡng chất lượng (Recall $\ge 70\%$, Faithfulness $\ge 85\%$) -> Xuất báo cáo hiệu năng.
 
-**Tech Stack:** Python 3.10+, `pydantic`, `pytest`, `pytest-asyncio`.
+**Tech Stack:** `uv`, Python 3.10+, `pydantic`, `pytest`, `pytest-asyncio`.
 
 **Spec:** `docs/superpowers/specs/2026-08-31-ebook-rag-baseline-hld.md`
 
 ## Global Constraints
 
+- **Environment & Execution**: Toàn bộ các lệnh chạy test, cài đặt dependencies và thực thi phải thông qua **`uv`** (ví dụ: `uv run pytest`).
 - **Input Hand-off**: Nhận `EBookRAGPipeline` hoàn chỉnh từ Phase 3.
 - **Evaluation Criteria**: Retrieval Recall@5 $\ge 70\%$, Answer Faithfulness $\ge 85\%$, Latency $\le 2.5$s.
 - **Output Hand-off**: Xuất `BenchmarkReport` đóng vai trò là mốc so sánh (Baseline Benchmark) cho các phiên bản tiếp theo.
@@ -69,9 +70,9 @@ async def test_benchmark_runner_metrics():
     assert report.passed_threshold is True
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test using uv to verify it fails**
 
-Run: `pytest tests/evaluation/test_benchmark.py -v`
+Run: `uv run pytest tests/evaluation/test_benchmark.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -153,9 +154,9 @@ class BenchmarkRunner:
         )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test using uv to verify it passes**
 
-Run: `pytest tests/evaluation/test_benchmark.py -v`
+Run: `uv run pytest tests/evaluation/test_benchmark.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**

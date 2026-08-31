@@ -1,20 +1,50 @@
-# Phase 1: Ingestion & Validation Implementation Plan
+# Phase 1: Ingestion & Validation Implementation Plan (Managed with uv)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Xây dựng Phase 1 bao gồm Domain Models, Workspace Manager, cơ chế tiếp nhận PDF, kiểm tra text layer (chặn PDF scan) và phân mảnh cửa sổ cố định Flat-Window.
+**Goal:** Khởi tạo project với `uv`, xây dựng Domain Models, Workspace Manager, cơ chế tiếp nhận PDF, kiểm tra text layer (chặn PDF scan `ERR_UNSUPPORTED_SCANNED_PDF`) và phân mảnh cửa sổ cố định Flat-Window.
 
-**Architecture:** Tiếp nhận file PDF nhị phân -> Trích xuất trang -> Đo mật độ ký tự hợp lệ để phát hiện PDF scan -> Phân mảnh cửa sổ trượt (Flat-window) và gắn metadata (`workspace_id`, `book_title`, `page_number`).
+**Architecture:** Môi trường quản lý bởi `uv` -> Tiếp nhận file PDF nhị phân -> Trích xuất trang -> Đo mật độ ký tự hợp lệ để phát hiện PDF scan -> Phân mảnh cửa sổ trượt (Flat-window) và gắn metadata (`workspace_id`, `book_title`, `page_number`).
 
-**Tech Stack:** Python 3.10+, `pydantic`, `pypdf`, `pytest`.
+**Tech Stack:** `uv`, Python 3.10+, `pydantic`, `pypdf`, `pytest`.
 
 **Spec:** `docs/superpowers/specs/2026-08-31-ebook-rag-baseline-hld.md`
 
 ## Global Constraints
 
+- **Environment & Execution**: Toàn bộ các lệnh chạy test, cài đặt dependencies và thực thi phải thông qua **`uv`** (ví dụ: `uv run pytest`).
 - **Document Format**: Digital PDF tiếng Anh có text layer. Từ chối PDF scan với mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
 - **Chunking**: Cửa sổ trượt cố định (Flat-Window) kích thước 512 tokens, gối đầu 50 tokens (~10%).
 - **Output Hand-off**: Xuất ra danh sách `List[Chunk]` (Normalized Chunks Collection) làm đầu vào cho Phase 2.
+
+---
+
+### Task 0: Project & Virtual Environment Initialization with uv
+
+**Files:**
+- Create: `pyproject.toml`
+- Create: `src/ebook_rag/__init__.py`
+- Test: `uv run python --version`
+
+- [ ] **Step 1: Initialize project using uv**
+
+```bash
+uv init --lib --name ebook_rag
+uv add pydantic pypdf httpx numpy
+uv add --dev pytest pytest-asyncio
+```
+
+- [ ] **Step 2: Verify environment with uv**
+
+Run: `uv run pytest --version`
+Expected: pytest version output
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add pyproject.toml uv.lock src/
+git commit -m "chore(phase-1): initialize project structure and dependencies with uv"
+```
 
 ---
 
@@ -72,9 +102,9 @@ def test_ingestion_result_rejected_scan():
     assert res.error_code == "ERR_UNSUPPORTED_SCANNED_PDF"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test using uv to verify it fails**
 
-Run: `pytest tests/core/test_models.py -v`
+Run: `uv run pytest tests/core/test_models.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -157,9 +187,9 @@ class IngestionResult(BaseModel):
     message: Optional[str] = None
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test using uv to verify it passes**
 
-Run: `pytest tests/core/test_models.py -v`
+Run: `uv run pytest tests/core/test_models.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -212,9 +242,9 @@ def test_workspace_book_assignment():
     assert "bk_001" in books
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test using uv to verify it fails**
 
-Run: `pytest tests/workspace/test_manager.py -v`
+Run: `uv run pytest tests/workspace/test_manager.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -253,9 +283,9 @@ class WorkspaceManager:
         return list(self._workspace_books.get(workspace_id, set()))
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test using uv to verify it passes**
 
-Run: `pytest tests/workspace/test_manager.py -v`
+Run: `uv run pytest tests/workspace/test_manager.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -332,9 +362,9 @@ def test_flat_window_chunker():
     assert len(chunks[0].text_content) > 0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test using uv to verify it fails**
 
-Run: `pytest tests/ingestion/test_ingestion_pipeline.py -v`
+Run: `uv run pytest tests/ingestion/test_ingestion_pipeline.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -434,9 +464,9 @@ class FlatWindowChunker:
         return chunks
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test using uv to verify it passes**
 
-Run: `pytest tests/ingestion/test_ingestion_pipeline.py -v`
+Run: `uv run pytest tests/ingestion/test_ingestion_pipeline.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**

@@ -3,12 +3,13 @@
 ## 1. Tổng quan Dự án (Executive Summary)
 Dự án **E-Book RAG Engine** là hệ thống hỏi đáp và truy xuất thông tin thông minh trên tập tài liệu sách điện tử (E-books). Hệ thống cho phép người dùng tổ chức sách theo từng Không gian làm việc (Workspace / Project), thực hiện các truy vấn ngữ nghĩa trong phạm vi cô lập và nhận câu trả lời chính xác có đính kèm số trang trích dẫn.
 
-Tài liệu này đóng vai trò là **High-Level Design (HLD) & Functional Specification**, duy trì góc nhìn **Hộp đen (Black-box)** và **Độc lập ngôn ngữ (Code-agnostic)**, tập trung vào luồng dữ liệu, hợp đồng giao diện, cấu hình tham số và tiêu chí thành công theo từng Phase.
+Tài liệu này đóng vai trò là **High-Level Design (HLD) & Functional Specification**, duy trì góc nhìn **Hộp đen (Black-box)** và **Độc lập ngôn ngữ (Code-agnostic)**, tập trung vào luồng dữ liệu, hợp đồng giao diện, cấu hình tham số và tiêu chí thành công theo từng Phase. Toàn bộ môi trường phát triển và thực thi dự án được chuẩn hóa quản lý bởi công cụ **`uv`**.
 
 ---
 
 ## 2. Phạm vi & Ràng buộc Hệ thống (Scope & Constraints)
 
+* **Môi trường & Công cụ Thực thi**: Toàn bộ dự án được quản lý qua công cụ **`uv`** (Python package & environment manager).
 * **Định dạng tài liệu hỗ trợ (MVP)**:
   - Chỉ hỗ trợ định dạng **Digital PDF** (có lớp văn bản - text layer hợp lệ).
   - Ngôn ngữ tài liệu: **Tiếng Anh (English)**.
@@ -33,7 +34,7 @@ Tài liệu này đóng vai trò là **High-Level Design (HLD) & Functional Spec
                     (Quản lý Sách & Workspace)    (Truy vấn theo ngữ cảnh)
                                    v                 v
 +----------------------------------------------------------------------------------+
-|                               E-BOOK RAG ENGINE                                  |
+|                          E-BOOK RAG ENGINE (Managed by uv)                       |
 |                                                                                  |
 |  [Module 1: Workspace Manager]      -->  [Module 2: Ingestion & Validation]      |
 |                                                              |                   |
@@ -184,7 +185,7 @@ flowchart TD
   - Tập dữ liệu kiểm thử chuẩn (Golden Evaluation Set gồm tối thiểu 30 câu hỏi Q&A có đáp án và vị trí trang mẫu).
   - Pipeline hoàn chỉnh từ **Phase 1 $\rightarrow$ Phase 3**.
 * **Xử lý Chức năng (Functional Processing)**:
-  1. Tự động thực thi toàn bộ tập câu hỏi kiểm thử trên hệ thống.
+  1. Tự động thực thi toàn bộ tập câu hỏi kiểm thử trên hệ thống bằng lệnh `uv run`.
   2. Thu thập và tính toán các chỉ số:
      - **Retrieval Recall@5**: Tỷ lệ câu hỏi mà trang chứa thông tin cần tìm xuất hiện trong Top-5 chunk truy xuất.
      - **Answer Faithfulness**: Tỷ lệ thông tin trong câu trả lời có bằng chứng trực tiếp từ ngữ cảnh trích xuất.
@@ -292,6 +293,7 @@ QueryWorkspace(workspace_id: string, query_text: string, top_k: integer = 5)
 ## 7. Lộ trình Nâng cấp Hệ thống (Evolutionary Roadmap)
 
 1. **Vòng lặp 1 (Hiện tại - Baseline MVP)**:
+   - Quản lý môi trường nhanh gọn với `uv`.
    - Cửa sổ trượt cố định (Flat-Window Chunking).
    - Truy xuất Vector đơn thuần (Jina Dense Retrieval) + Phân vùng Workspace.
    - Sinh phản hồi với DeepSeek v4 Flash.

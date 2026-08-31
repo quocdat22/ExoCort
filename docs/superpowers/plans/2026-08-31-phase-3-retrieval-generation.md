@@ -1,17 +1,18 @@
-# Phase 3: Scoped Retrieval & Generation Implementation Plan
+# Phase 3: Scoped Retrieval & Generation Implementation Plan (Managed with uv)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Xây dựng Phase 3 bao gồm bộ máy tạo Prompt ngữ cảnh, tích hợp mô hình `deepseek/deepseek-v4-flash-0731` qua OpenRouter để sinh câu trả lời kèm trích dẫn chuẩn, và hợp nhất toàn bộ luồng xử lý thành `EBookRAGPipeline`.
+**Goal:** Xây dựng Phase 3 bao gồm bộ máy tạo Prompt ngữ cảnh, tích hợp mô hình `deepseek/deepseek-v4-flash-0731` qua OpenRouter để sinh câu trả lời kèm trích dẫn chuẩn, và hợp nhất toàn bộ luồng xử lý thành `EBookRAGPipeline`. Môi trường thực thi quản lý bởi `uv`.
 
 **Architecture:** Nhận truy vấn và `workspace_id` -> Vector hóa câu hỏi qua Jina -> Truy xuất Top-K từ `ScopedVectorStore` -> Đóng gói khối ngữ cảnh -> Gửi tới DeepSeek v4 Flash với quy tắc trích dẫn nghiêm ngặt -> Trả về `QueryResult` hoàn chỉnh.
 
-**Tech Stack:** Python 3.10+, `httpx`, `pytest`, `pytest-asyncio`.
+**Tech Stack:** `uv`, Python 3.10+, `httpx`, `pytest`, `pytest-asyncio`.
 
 **Spec:** `docs/superpowers/specs/2026-08-31-ebook-rag-baseline-hld.md`
 
 ## Global Constraints
 
+- **Environment & Execution**: Toàn bộ các lệnh chạy test, cài đặt dependencies và thực thi phải thông qua **`uv`** (ví dụ: `uv run pytest`).
 - **Input Hand-off**: Nhận `ScopedVectorStore` và `JinaEmbeddingClient` từ Phase 2, `PDFValidator` và `FlatWindowChunker` từ Phase 1.
 - **LLM Model**: `deepseek/deepseek-v4-flash-0731` qua OpenRouter API.
 - **Citation Format**: Bắt buộc gắn kèm `book_title` và `page_number`.
@@ -98,9 +99,9 @@ async def test_deepseek_generate_response_mock():
         assert citations[0].page_number == 45
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test using uv to verify it fails**
 
-Run: `pytest tests/generation/test_deepseek_generation.py -v`
+Run: `uv run pytest tests/generation/test_deepseek_generation.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -179,9 +180,9 @@ class DeepSeekGenerator:
         return answer, citations
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test using uv to verify it passes**
 
-Run: `pytest tests/generation/test_deepseek_generation.py -v`
+Run: `uv run pytest tests/generation/test_deepseek_generation.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -251,9 +252,9 @@ async def test_pipeline_ingest_and_query_flow():
     assert query_res.total_latency_ms > 0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test using uv to verify it fails**
 
-Run: `pytest tests/test_e2e_pipeline.py -v`
+Run: `uv run pytest tests/test_e2e_pipeline.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -399,9 +400,9 @@ class EBookRAGPipeline:
         )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test using uv to verify it passes**
 
-Run: `pytest tests/test_e2e_pipeline.py -v`
+Run: `uv run pytest tests/test_e2e_pipeline.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**

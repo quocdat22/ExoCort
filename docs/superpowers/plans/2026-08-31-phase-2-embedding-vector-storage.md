@@ -1,17 +1,18 @@
-# Phase 2: Embedding & Vector Storage Implementation Plan
+# Phase 2: Embedding & Vector Storage Implementation Plan (Managed with uv)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Xây dựng Phase 2 thực hiện nhúng vector văn bản theo lô qua API `jina-embeddings-v5-omni-small` và lưu trữ vào Vector Store hỗ trợ lọc cô lập theo `workspace_id`.
+**Goal:** Xây dựng Phase 2 thực hiện nhúng vector văn bản theo lô qua API `jina-embeddings-v5-omni-small` và lưu trữ vào Vector Store hỗ trợ lọc cô lập theo `workspace_id`. Quản lý môi trường và thực thi với `uv`.
 
 **Architecture:** Nhận `List[Chunk]` từ Phase 1 -> Gom nhóm theo batch (32 chunks) -> Gọi Jina Embedding API tạo dense vector -> Lưu trữ vào `ScopedVectorStore` với chuẩn hóa vector L2 để tìm kiếm Cosine Similarity.
 
-**Tech Stack:** Python 3.10+, `httpx`, `numpy`, `pytest`, `pytest-asyncio`.
+**Tech Stack:** `uv`, Python 3.10+, `httpx`, `numpy`, `pytest`, `pytest-asyncio`.
 
 **Spec:** `docs/superpowers/specs/2026-08-31-ebook-rag-baseline-hld.md`
 
 ## Global Constraints
 
+- **Environment & Execution**: Toàn bộ các lệnh chạy test, cài đặt dependencies và thực thi phải thông qua **`uv`** (ví dụ: `uv run pytest`).
 - **Input Hand-off**: Nhận `List[Chunk]` đã chuẩn hóa từ Phase 1.
 - **Embedding Model**: `jina-embeddings-v5-omni-small` qua Jina AI API (`https://api.jina.ai/v1/embeddings`).
 - **Batch Size**: 32 chunks / request.
@@ -73,9 +74,9 @@ def test_scoped_vector_store_empty_workspace():
     assert results == []
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test using uv to verify it fails**
 
-Run: `pytest tests/storage/test_vector_store.py -v`
+Run: `uv run pytest tests/storage/test_vector_store.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -130,9 +131,9 @@ class ScopedVectorStore:
         return len(self._store.get(workspace_id, []))
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test using uv to verify it passes**
 
-Run: `pytest tests/storage/test_vector_store.py -v`
+Run: `uv run pytest tests/storage/test_vector_store.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -194,9 +195,9 @@ async def test_jina_client_batching():
         assert mock_post.call_count == 2
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test using uv to verify it fails**
 
-Run: `pytest tests/embedding/test_jina_client.py -v`
+Run: `uv run pytest tests/embedding/test_jina_client.py -v`
 Expected: FAIL with `ModuleNotFoundError`
 
 - [ ] **Step 3: Write minimal implementation**
@@ -240,9 +241,9 @@ class JinaEmbeddingClient:
         return all_embeddings
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 4: Run test using uv to verify it passes**
 
-Run: `pytest tests/embedding/test_jina_client.py -v`
+Run: `uv run pytest tests/embedding/test_jina_client.py -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
