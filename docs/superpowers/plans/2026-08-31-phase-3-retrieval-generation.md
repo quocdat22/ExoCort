@@ -256,9 +256,11 @@ git commit -m "feat(phase-3): add DeepSeek generator with fast agile resilience 
 
 ```python
 # tests/test_e2e_pipeline.py
+import asyncio
 import pytest
 import tempfile
 from unittest.mock import AsyncMock, patch
+from pydantic import SecretStr
 from exocort.pipeline import EBookRAGPipeline
 from exocort.core.config import RAGConfig
 from exocort.core.models import IngestionStatus, QueryStatus
@@ -342,6 +344,166 @@ async def test_pipeline_generation_failure_partial_fallback():
         assert query_res.error_code == "ERR_UPSTREAM_GENERATION_FAILED"
         assert "tạm thời gián đoạn" in query_res.answer
 
+@pytest.mark.asyncio
+async def test_pipeline_query_timeout_budget():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = RAGConfig(
+            chroma_persist_dir=tmpdir,
+            jina_api_key=SecretStr("mock_jina_key"),
+            openrouter_api_key=SecretStr("mock_openrouter_key"),
+            query_total_timeout_budget=0.05,
+        )
+        pipeline = EBookRAGPipeline(config)
+        ws = pipeline.workspace_mgr.create_workspace(name="TimeoutWS")
+
+        async def slow_embed(text):
+            await asyncio.sleep(0.2)
+            return [0.1] * 1024
+
+        pipeline.embedding_client.embed_query = slow_embed
+
+        query_res = await pipeline.query_workspace(
+            workspace_id=ws.workspace_id,
+            query_text="Will this timeout?"
+        )
+        assert query_res.status == QueryStatus.FAILED
+        assert query_res.error_code == "ERR_QUERY_TIMEOUT"
+        assert "timeout budget" in query_res.error_message.lower()
+
+@pytest.mark.asyncio
+async def test_pipeline_atomic_overwrite_failure_preserves_old_data():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = RAGConfig(
+            min_text_density_per_page=10,
+            chroma_persist_dir=tmpdir,
+            jina_api_key=SecretStr("mock_jina_key"),
+            openrouter_api_key=SecretStr("mock_openrouter_key"),
+        )
+        pipeline = EBookRAGPipeline(config)
+        ws = pipeline.workspace_mgr.create_workspace(name="Engineering")
+
+        # 1. First ingest succeeds
+        pipeline.embedding_client.embed_texts = AsyncMock(return_value=[[0.1] * 1024])
+        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "Original Version Content")]):
+            res1 = await pipeline.ingest_book(
+                pdf_bytes=b"%PDF-1.4 mock",
+                workspace_id=ws.workspace_id,
+                book_title="Refactoring",
+                overwrite=False
+            )
+            assert res1.status == IngestionStatus.COMPLETED
+            old_book_id = res1.book_id
+
+        # Check old book exists in workspace and vector store
+        assert pipeline.workspace_mgr.get_book_by_title(ws.workspace_id, "Refactoring") is not None
+        assert pipeline.vector_store.count() == 1
+
+        # 2. Overwrite attempt FAILS during embedding
+        pipeline.embedding_client.embed_texts = AsyncMock(side_effect=RuntimeError("Jina 503 Service Unavailable"))
+        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "New Broken Version Content")]):
+            res2 = await pipeline.ingest_book(
+                pdf_bytes=b"%PDF-1.4 mock",
+                workspace_id=ws.workspace_id,
+                book_title="Refactoring",
+                overwrite=True
+            )
+            assert res2.status == IngestionStatus.FAILED
+            assert res2.error_code == "ERR_UPSTREAM_EMBEDDING_FAILED"
+
+        # 3. VERIFY OLD BOOK IS PRESERVED (Atomic Guarantee: No data loss!)
+        preserved_book = pipeline.workspace_mgr.get_book_by_title(ws.workspace_id, "Refactoring")
+        assert preserved_book is not None
+        assert preserved_book.book_id == old_book_id
+        assert pipeline.vector_store.count() == 1
+
+@pytest.mark.asyncio
+async def test_pipeline_atomic_overwrite_success():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = RAGConfig(
+            min_text_density_per_page=10,
+            chroma_persist_dir=tmpdir,
+            jina_api_key=SecretStr("mock_jina_key"),
+            openrouter_api_key=SecretStr("mock_openrouter_key"),
+        )
+        pipeline = EBookRAGPipeline(config)
+        ws = pipeline.workspace_mgr.create_workspace(name="Engineering")
+
+        # 1. Initial Ingest
+        pipeline.embedding_client.embed_texts = AsyncMock(return_value=[[0.1] * 1024])
+        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "v1 text")]):
+            res1 = await pipeline.ingest_book(
+                pdf_bytes=b"%PDF-1.4 mock",
+                workspace_id=ws.workspace_id,
+                book_title="Refactoring",
+                overwrite=False
+            )
+            assert res1.status == IngestionStatus.COMPLETED
+            old_book_id = res1.book_id
+
+        # 2. Overwrite succeeds
+        pipeline.embedding_client.embed_texts = AsyncMock(return_value=[[0.2] * 1024, [0.3] * 1024])
+        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "v2 p1"), (2, "v2 p2")]):
+            res2 = await pipeline.ingest_book(
+                pdf_bytes=b"%PDF-1.4 mock",
+                workspace_id=ws.workspace_id,
+                book_title="Refactoring",
+                overwrite=True
+            )
+            assert res2.status == IngestionStatus.COMPLETED
+            assert res2.book_id != old_book_id
+            assert res2.total_chunks_indexed == 2
+
+        # Verify old vectors cleaned up and new book registered
+        updated_book = pipeline.workspace_mgr.get_book_by_title(ws.workspace_id, "Refactoring")
+        assert updated_book is not None
+        assert updated_book.book_id == res2.book_id
+        assert pipeline.vector_store.count() == 2
+
+@pytest.mark.asyncio
+async def test_pipeline_concurrent_ingest_duplicate_book_title():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = RAGConfig(
+            min_text_density_per_page=10,
+            chroma_persist_dir=tmpdir,
+            jina_api_key=SecretStr("mock_jina_key"),
+            openrouter_api_key=SecretStr("mock_openrouter_key"),
+        )
+        pipeline = EBookRAGPipeline(config)
+        ws = pipeline.workspace_mgr.create_workspace(name="ConcurrentWS")
+
+        # Simulate slow embedding to expose any race condition
+        async def slow_embed(texts):
+            await asyncio.sleep(0.05)
+            return [[0.1] * 1024 for _ in texts]
+
+        pipeline.embedding_client.embed_texts = slow_embed
+
+        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "Concurrent Book Content")]):
+            res1, res2 = await asyncio.gather(
+                pipeline.ingest_book(
+                    pdf_bytes=b"%PDF-1.4 mock",
+                    workspace_id=ws.workspace_id,
+                    book_title="Concurrency Book",
+                    overwrite=False
+                ),
+                pipeline.ingest_book(
+                    pdf_bytes=b"%PDF-1.4 mock",
+                    workspace_id=ws.workspace_id,
+                    book_title="Concurrency Book",
+                    overwrite=False
+                ),
+            )
+
+            statuses = {res1.status, res2.status}
+            assert statuses == {IngestionStatus.COMPLETED, IngestionStatus.REJECTED}
+
+            rejected_res = res1 if res1.status == IngestionStatus.REJECTED else res2
+            assert rejected_res.error_code == "ERR_DUPLICATE_BOOK_TITLE"
+
+            books = pipeline.workspace_mgr.list_workspace_books(ws.workspace_id)
+            assert len(books) == 1
+            assert books[0].title == "Concurrency Book"
+
 def test_pipeline_init_missing_api_keys_fails_fast():
     config = RAGConfig(jina_api_key=SecretStr(""), openrouter_api_key=SecretStr(""))
     with pytest.raises(ValueError, match="ERR_MISSING_API_KEY"):
@@ -357,9 +519,10 @@ Expected: FAIL with `ModuleNotFoundError`
 
 ```python
 # src/exocort/pipeline.py
+import asyncio
 import time
 import uuid
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from exocort.core.config import RAGConfig
 from exocort.core.models import (
     BookMetadata,
@@ -390,6 +553,13 @@ class EBookRAGPipeline:
         self.embedding_client = JinaEmbeddingClient(self.config)
         self.vector_store = ScopedVectorStore(persist_dir=self.config.chroma_persist_dir)
         self.generator = DeepSeekGenerator(self.config)
+        self._ingest_locks: Dict[Tuple[str, str], asyncio.Lock] = {}
+
+    def _get_ingest_lock(self, workspace_id: str, book_title: str) -> asyncio.Lock:
+        key = (workspace_id, book_title.strip().lower())
+        if key not in self._ingest_locks:
+            self._ingest_locks[key] = asyncio.Lock()
+        return self._ingest_locks[key]
 
     async def ingest_book(
         self,
@@ -398,131 +568,134 @@ class EBookRAGPipeline:
         book_title: str,
         overwrite: bool = False
     ) -> IngestionResult:
-        start_time = time.time()
-        
-        # 1. Verify workspace existence
-        if not self.workspace_mgr.get_workspace(workspace_id):
-            return IngestionResult(
-                status=IngestionStatus.FAILED,
-                error_code="ERR_WORKSPACE_NOT_FOUND",
-                message=f"Workspace {workspace_id} does not exist."
-            )
+        lock = self._get_ingest_lock(workspace_id, book_title)
+        async with lock:
+            start_time = time.time()
+            
+            # 1. Verify workspace existence
+            if not self.workspace_mgr.get_workspace(workspace_id):
+                return IngestionResult(
+                    status=IngestionStatus.FAILED,
+                    error_code="ERR_WORKSPACE_NOT_FOUND",
+                    message=f"Workspace {workspace_id} does not exist."
+                )
 
-        # 2. Deduplication Check
-        existing_book = self.workspace_mgr.get_book_by_title(workspace_id, book_title)
-        if existing_book and not overwrite:
-            return IngestionResult(
-                status=IngestionStatus.REJECTED,
-                error_code="ERR_DUPLICATE_BOOK_TITLE",
-                message=f"Book with title '{book_title}' already exists in workspace '{workspace_id}'. Set overwrite=true to replace."
-            )
+            # 2. Deduplication Check
+            existing_book = self.workspace_mgr.get_book_by_title(workspace_id, book_title)
+            if existing_book and not overwrite:
+                return IngestionResult(
+                    status=IngestionStatus.REJECTED,
+                    error_code="ERR_DUPLICATE_BOOK_TITLE",
+                    message=f"Book with title '{book_title}' already exists in workspace '{workspace_id}'. Set overwrite=true to replace."
+                )
 
-        # 3. Extract pages
-        try:
-            pages = PDFExtractor.extract_pages(pdf_bytes)
-        except Exception as e:
-            return IngestionResult(
-                status=IngestionStatus.FAILED,
-                error_code="ERR_PDF_EXTRACTION_FAILED",
-                message=f"Failed to extract PDF: {str(e)}"
-            )
-
-        # 4. Guardrails & Validation Gate
-        is_valid_count, count_error = self.validator.validate_page_count(len(pages))
-        if not is_valid_count:
-            return IngestionResult(
-                status=IngestionStatus.REJECTED,
-                error_code=count_error,
-                message=f"Document contains {len(pages)} pages, exceeding maximum limit of {self.config.max_pages_per_book}."
-            )
-
-        pages_text = [p[1] for p in pages]
-        is_valid_text, text_error = self.validator.validate_text_layer(pages_text)
-        if not is_valid_text:
-            return IngestionResult(
-                status=IngestionStatus.REJECTED,
-                error_code=text_error,
-                message="Scanned PDF format without valid text layer is not supported in MVP baseline."
-            )
-
-        # 5. Flat-Window Chunking
-        book_id = existing_book.book_id if (existing_book and overwrite) else f"bk_{uuid.uuid4().hex[:8]}"
-        chunks = self.chunker.chunk_pages(
-            pages=pages,
-            workspace_id=workspace_id,
-            book_id=book_id,
-            book_title=book_title
-        )
-
-        if not chunks:
-            return IngestionResult(
-                status=IngestionStatus.FAILED,
-                error_code="ERR_NO_CHUNKS_GENERATED",
-                message="No valid chunks could be extracted from the document."
-            )
-
-        if len(chunks) > self.config.max_chunks_per_book:
-            return IngestionResult(
-                status=IngestionStatus.REJECTED,
-                error_code="ERR_DOCUMENT_TOO_LARGE",
-                message=f"Chunk count {len(chunks)} exceeds maximum limit of {self.config.max_chunks_per_book}."
-            )
-
-        # 6. Atomic Cleanup if Overwriting
-        if existing_book and overwrite:
+            # 3. Extract pages
             try:
-                self.vector_store.delete_by_book(existing_book.book_id)
-                self.workspace_mgr.remove_book(workspace_id, existing_book.book_id)
+                pages = PDFExtractor.extract_pages(pdf_bytes)
             except Exception as e:
                 return IngestionResult(
                     status=IngestionStatus.FAILED,
-                    error_code="ERR_VECTOR_STORAGE_FAILED",
-                    message=f"Failed to clear old records during overwrite: {str(e)}"
+                    error_code="ERR_PDF_EXTRACTION_FAILED",
+                    message=f"Failed to extract PDF: {str(e)}"
                 )
 
-        # 7. Embed Chunks (Patient Retry Profile)
-        chunk_texts = [c.text_content for c in chunks]
-        try:
-            vectors = await self.embedding_client.embed_texts(chunk_texts)
-        except Exception as e:
-            return IngestionResult(
-                status=IngestionStatus.FAILED,
-                error_code="ERR_UPSTREAM_EMBEDDING_FAILED",
-                message=f"Failed to embed chunks after retry: {str(e)}"
+            # 4. Guardrails & Validation Gate
+            is_valid_count, count_error = self.validator.validate_page_count(len(pages))
+            if not is_valid_count:
+                return IngestionResult(
+                    status=IngestionStatus.REJECTED,
+                    error_code=count_error,
+                    message=f"Document contains {len(pages)} pages, exceeding maximum limit of {self.config.max_pages_per_book}."
+                )
+
+            pages_text = [p[1] for p in pages]
+            is_valid_text, text_error = self.validator.validate_text_layer(pages_text)
+            if not is_valid_text:
+                return IngestionResult(
+                    status=IngestionStatus.REJECTED,
+                    error_code=text_error,
+                    message="Scanned PDF format without valid text layer is not supported in MVP baseline."
+                )
+
+            # 5. Flat-Window Chunking (Always generate fresh new_book_id for Blue-Green staged swap)
+            new_book_id = f"bk_{uuid.uuid4().hex[:8]}"
+            chunks = self.chunker.chunk_pages(
+                pages=pages,
+                workspace_id=workspace_id,
+                book_id=new_book_id,
+                book_title=book_title
             )
 
-        # 8. Index into Scoped Vector Store
-        try:
-            self.vector_store.add_chunks(chunks, vectors)
-        except Exception as e:
-            return IngestionResult(
-                status=IngestionStatus.FAILED,
-                error_code="ERR_VECTOR_STORAGE_FAILED",
-                message=f"Failed to persist vector records: {str(e)}"
+            if not chunks:
+                return IngestionResult(
+                    status=IngestionStatus.FAILED,
+                    error_code="ERR_NO_CHUNKS_GENERATED",
+                    message="No valid chunks could be extracted from the document."
+                )
+
+            if len(chunks) > self.config.max_chunks_per_book:
+                return IngestionResult(
+                    status=IngestionStatus.REJECTED,
+                    error_code="ERR_DOCUMENT_TOO_LARGE",
+                    message=f"Chunk count {len(chunks)} exceeds maximum limit of {self.config.max_chunks_per_book}."
+                )
+
+            # 6. Embed Chunks (Patient Retry Profile)
+            chunk_texts = [c.text_content for c in chunks]
+            try:
+                vectors = await self.embedding_client.embed_texts(chunk_texts)
+            except Exception as e:
+                return IngestionResult(
+                    status=IngestionStatus.FAILED,
+                    error_code="ERR_UPSTREAM_EMBEDDING_FAILED",
+                    message=f"Failed to embed chunks after retry: {str(e)}"
+                )
+
+            # 7. Index into Scoped Vector Store under new_book_id
+            try:
+                self.vector_store.add_chunks(chunks, vectors)
+            except Exception as e:
+                # Rollback any partial chunks from new_book_id
+                try:
+                    self.vector_store.delete_by_book(new_book_id)
+                except Exception:
+                    pass
+                return IngestionResult(
+                    status=IngestionStatus.FAILED,
+                    error_code="ERR_VECTOR_STORAGE_FAILED",
+                    message=f"Failed to persist vector records: {str(e)}"
+                )
+
+            # 8. Atomic Swap & Cleanup of Old Book (only after new book is fully embedded & stored)
+            if existing_book and overwrite:
+                try:
+                    self.vector_store.delete_by_book(existing_book.book_id)
+                    self.workspace_mgr.remove_book(workspace_id, existing_book.book_id)
+                except Exception:
+                    pass
+
+            # 9. Register New Book Metadata
+            book_meta = BookMetadata(
+                book_id=new_book_id,
+                workspace_id=workspace_id,
+                title=book_title,
+                total_pages=len(pages),
+                total_chunks=len(chunks)
             )
+            self.workspace_mgr.assign_book(workspace_id, book_meta)
 
-        # 9. Register Book Metadata
-        book_meta = BookMetadata(
-            book_id=book_id,
-            workspace_id=workspace_id,
-            title=book_title,
-            total_pages=len(pages),
-            total_chunks=len(chunks)
-        )
-        self.workspace_mgr.assign_book(workspace_id, book_meta)
+            duration = time.time() - start_time
+            total_tokens_est = sum(c.token_count for c in chunks)
 
-        duration = time.time() - start_time
-        total_tokens_est = sum(c.token_count for c in chunks)
-
-        return IngestionResult(
-            status=IngestionStatus.COMPLETED,
-            book_id=book_id,
-            book_title=book_title,
-            total_pages=len(pages),
-            total_chunks_indexed=len(chunks),
-            estimated_total_tokens=total_tokens_est,
-            processing_time_sec=round(duration, 2)
-        )
+            return IngestionResult(
+                status=IngestionStatus.COMPLETED,
+                book_id=new_book_id,
+                book_title=book_title,
+                total_pages=len(pages),
+                total_chunks_indexed=len(chunks),
+                estimated_total_tokens=total_tokens_est,
+                processing_time_sec=round(duration, 2)
+            )
 
     async def query_workspace(
         self,
@@ -531,6 +704,29 @@ class EBookRAGPipeline:
         top_k: Optional[int] = None
     ) -> QueryResult:
         start_time = time.time()
+        try:
+            return await asyncio.wait_for(
+                self._query_workspace_internal(workspace_id, query_text, top_k, start_time),
+                timeout=self.config.query_total_timeout_budget
+            )
+        except asyncio.TimeoutError:
+            total_lat = round((time.time() - start_time) * 1000, 2)
+            return QueryResult(
+                query=query_text,
+                workspace_id=workspace_id,
+                status=QueryStatus.FAILED,
+                error_code="ERR_QUERY_TIMEOUT",
+                error_message=f"Query execution exceeded total timeout budget of {self.config.query_total_timeout_budget}s.",
+                total_latency_ms=total_lat,
+            )
+
+    async def _query_workspace_internal(
+        self,
+        workspace_id: str,
+        query_text: str,
+        top_k: Optional[int],
+        start_time: float,
+    ) -> QueryResult:
         k = top_k or self.config.top_k
 
         # 1. Validate Workspace

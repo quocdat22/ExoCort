@@ -19,7 +19,8 @@ Tài liệu này đóng vai trò là **High-Level Design (HLD) & Functional Spec
 * **Mô hình Không gian làm việc & Định danh Sách (Workspace Scoping & Book Uniqueness)**:
   - Người dùng có thể tạo các Workspace độc lập, phân loại sách vào từng Workspace; mọi truy vấn đều được giới hạn trong phạm vi Workspace đã chọn.
   - Tên sách (`book_title`) là duy nhất trong phạm vi từng Workspace. Hai Workspace khác nhau có thể chứa sách cùng tên.
-  - Nạp lại sách trùng tên trong cùng Workspace phải tuân thủ chính sách **Deduplication & Re-ingestion Policy** (chặn trùng mặc định hoặc ghi đè có dọn dẹp sạch vector cũ khi có cờ `overwrite=true`).
+  - Nạp lại sách trùng tên trong cùng Workspace phải tuân thủ chính sách **Deduplication & Re-ingestion Policy** (chặn trùng mặc định khi `overwrite=false`; khi `overwrite=true`, áp dụng mô hình **Atomic Replacement theo cơ chế Blue-Green Stage & Swap**: hoàn tất nhúng và lập chỉ mục bản mới trước, chỉ hoán đổi metadata và dọn dẹp bản cũ sau khi bản mới sẵn sàng 100%, bảo vệ dữ liệu cũ nguyên vẹn nếu xảy ra lỗi giữa chừng).
+  - **Kiểm soát đồng thời (Concurrency Control)**: Sử dụng khóa `asyncio.Lock` phân định theo cặp `(workspace_id, book_title)` để bảo vệ toàn bộ chu trình nạp (Check $\rightarrow$ Embed $\rightarrow$ Assign), triệt tiêu hoàn toàn Race Condition khi có các request nạp sách trùng tên gửi tới đồng thời.
 * **Nhà cung cấp & Mô hình AI**:
   - **Mô hình Sinh ngôn ngữ (LLM)**: `deepseek/deepseek-v4-flash-0731` thông qua nhà cung cấp **OpenRouter**.
   - **Mô hình Nhúng Vector (Embedding)**: `jina-embeddings-v5-omni-small` thông qua nhà cung cấp **Jina AI**.
@@ -103,7 +104,7 @@ erDiagram
 * **Tầng Vector Storage (Scoped Vector Store)**:
   - Sử dụng **ChromaDB persistent** (`./chroma_data`) để lưu trữ các bản ghi `VECTOR_RECORD` và metadata chunk (`workspace_id`, `book_id`, `book_title`, `page_start`, `page_end`, `text_content`, `chunk_index`).
   - Dữ liệu vector được lưu bền vững trên ổ đĩa và tồn tại qua các lần restart hệ thống.
-  - Cung cấp cơ chế xóa sạch triệt để theo sách `delete_by_book(book_id)` để phục vụ quy trình Atomic Replacement khi ghi đè sách.
+  - Cung cấp cơ chế xóa sạch triệt để theo sách `delete_by_book(book_id)` để phục vụ dọn dẹp vector cũ sau khi hoàn tất Atomic Replacement (Stage & Swap) khi ghi đè sách.
 
 * **Tầng Quản trị Metadata (Workspace & Book Metadata)**:
   - **Baseline MVP**: Được quản lý **In-Memory** (`WorkspaceManager` lưu trữ danh mục `Workspace` và `BookMetadata` qua `dict` trong RAM) để tối giản phạm vi và độ phức tạp khởi đầu.
@@ -159,7 +160,7 @@ flowchart TD
   1. *Workspace Existence Check*: Kiểm tra `workspace_id` có tồn tại không. Nếu không, từ chối với mã lỗi `ERR_WORKSPACE_NOT_FOUND`.
   2. *Deduplication Gate*: Kiểm tra xem sách cùng `book_title` đã tồn tại trong Workspace chưa.
      - Nếu đã tồn tại và `overwrite == false`: Lập tức từ chối với mã lỗi `ERR_DUPLICATE_BOOK_TITLE`.
-     - Nếu đã tồn tại và `overwrite == true`: Đánh dấu `old_book_id` để thực hiện Atomic Replacement (xóa vector cũ ở Phase 2).
+     - Nếu đã tồn tại và `overwrite == true`: Cho phép tiếp tục luồng nạp theo quy trình Staged Atomic Replacement (tạo `new_book_id` riêng biệt, nhúng và lập chỉ mục bản mới trước, chỉ dọn dẹp `old_book_id` sau khi bản mới thành công 100%).
   3. *Page Cap Validation Gate*: Đếm số trang PDF. Nếu vượt quá `max_pages_per_book` (1,000 trang), từ chối với mã lỗi `ERR_DOCUMENT_TOO_LARGE`.
   4. *Scan Detection Gate*: Đo mật độ ký tự văn bản có nghĩa trên mỗi trang. Nếu tỷ lệ trang hợp lệ (≥ 50 ký tự/trang) thấp hơn 50% tổng số trang, lập tức từ chối với mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
   5. *Text Extraction*: Trích xuất toàn bộ văn bản theo từng trang, lưu giữ ranh giới trang (character offset).
@@ -172,7 +173,7 @@ flowchart TD
 * **Tiêu chí Hoàn thành (DoD)**:
   - 100% file PDF scan bị từ chối với mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
   - 100% file vượt quá 1,000 trang bị từ chối với mã lỗi `ERR_DOCUMENT_TOO_LARGE`.
-  - Sách trùng tên bị chặn khi `overwrite=false` và được xử lý thay thế sạch sẽ khi `overwrite=true`.
+  - Sách trùng tên bị chặn khi `overwrite=false` và được xử lý thay thế sạch sẽ khi `overwrite=true` không gây mất dữ liệu nếu nạp thất bại.
   - 100% chunk được gán đúng `workspace_id`, `book_title`, `page_start`, `page_end`.
 
 ---
@@ -184,19 +185,19 @@ flowchart TD
   - Normalized Chunks Collection từ **Phase 1**.
   - `old_book_id` (nếu đang thực hiện ghi đè sách).
 * **Xử lý Chức năng (Functional Processing)**:
-  1. *Atomic Cleanup (khi ghi đè)*: Nếu có `old_book_id`, thực hiện `vector_store.delete_by_book(old_book_id)` để xóa triệt để các vector cũ trước khi nạp mới.
-  2. *Batch Grouping & Throttling*: Gom nhóm các chunk thành từng lô (Batch Size = 32 chunks). Áp dụng `asyncio.Semaphore(max_concurrency=4)` và giãn cách `inter_batch_delay_sec = 0.05s` để tránh chạm trần Rate Limit (RPM/TPM) của Jina AI.
-  3. *Resilient Batch Embedding (Patient Retry Profile)*:
+  1. *Batch Grouping & Throttling*: Gom nhóm các chunk thành từng lô (Batch Size = 32 chunks). Áp dụng `asyncio.Semaphore(max_concurrency=4)` và giãn cách `inter_batch_delay_sec = 0.05s` để tránh chạm trần Rate Limit (RPM/TPM) của Jina AI.
+  2. *Resilient Batch Embedding (Patient Retry Profile)*:
      - Gửi văn bản tới mô hình `jina-embeddings-v5-omni-small`.
      - Cấu hình Retry: Tối đa 4 lần thử, Exponential backoff ($min=2s, max=30s$), `httpx` timeout = $45.0s$.
-     - Nếu thất bại sau khi hết số lần retry: Bắt ngoại lệ và trả về `IngestionResult` với `status=FAILED` và mã lỗi `ERR_UPSTREAM_EMBEDDING_FAILED`, không đăng ký sách vào `WorkspaceManager` (đảm bảo tính toàn vẹn trạng thái).
-  4. *Scoped Vector Indexing*: Ghi dữ liệu vào ChromaDB kèm metadata phân vùng `workspace_id`.
+     - Nếu thất bại sau khi hết số lần retry: Bắt ngoại lệ và trả về `IngestionResult` với `status=FAILED` và mã lỗi `ERR_UPSTREAM_EMBEDDING_FAILED`, không đăng ký sách mới vào `WorkspaceManager` và giữ nguyên trạng bản sách cũ (đảm bảo tính toàn vẹn trạng thái, không mất dữ liệu).
+  3. *Scoped Vector Indexing*: Ghi dữ liệu vào ChromaDB kèm metadata phân vùng `workspace_id`.
+  4. *Atomic Swap & Cleanup (khi ghi đè)*: Sau khi toàn bộ chunks của `new_book_id` đã được ghi thành công vào ChromaDB, hệ thống dọn dẹp các vector cũ của `old_book_id` (`vector_store.delete_by_book(old_book_id)`).
   5. *State Registration*: Cập nhật `BookMetadata` vào `WorkspaceManager`.
 * **Đầu ra (Output)**: **Scoped Vector Index** & **IngestionResult**.
 * **Tiêu chí Hoàn thành (DoD)**:
   - Tỷ lệ hoàn thành nhúng vector đạt 100% trên các chunk hợp lệ.
   - Tốc độ lập chỉ mục đạt tối thiểu $\ge$ 50 trang PDF/phút.
-  - Không làm sập ứng dụng khi Jina API gặp lỗi (trả về `IngestionResult` lỗi rõ ràng).
+  - Không làm sập ứng dụng khi Jina API gặp lỗi (trả về `IngestionResult` lỗi rõ ràng và giữ nguyên trạng dữ liệu cũ).
 
 ---
 
