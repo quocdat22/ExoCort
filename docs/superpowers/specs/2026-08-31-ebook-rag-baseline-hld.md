@@ -88,6 +88,17 @@ erDiagram
     }
 ```
 
+### 3.3. Chiến lược Lưu trữ & Ranh giới Persistence (Persistence & Storage Strategy)
+
+* **Tầng Vector Storage (Scoped Vector Store)**:
+  - Sử dụng **ChromaDB persistent** (`./chroma_data`) để lưu trữ các bản ghi `VECTOR_RECORD` và metadata chunk (`workspace_id`, `book_id`, `page_start`, `page_end`, `text_content`).
+  - Dữ liệu vector được lưu bền vững trên ổ đĩa và tồn tại qua các lần restart hệ thống.
+
+* **Tầng Quản trị Metadata (Workspace & Book Metadata)**:
+  - **Baseline MVP**: Được quản lý **In-Memory** (`WorkspaceManager` lưu trữ qua cấu trúc `dict` trong RAM) để tối giản phạm vi và độ phức tạp khởi đầu.
+  - **Lưu ý Kiến trúc & Rủi ro Dữ liệu Mồ côi (Architectural Note & Orphan Data Risk)**: Do metadata quản lý không được lưu xuống đĩa trong giai đoạn MVP, khi service/process khởi động lại, danh sách Workspace/Book trong RAM sẽ bị xóa sạch trong khi các bản ghi vector tương ứng vẫn tồn tại trong ChromaDB. Điều này dẫn đến tình trạng các vector record cũ bị "mồ côi" (orphan records) nếu người dùng truy vấn theo `workspace_id` đã bị mất ở tầng quản trị.
+  - **Hướng xử lý & Lộ trình (Roadmap Evolution)**: Ở Vòng lặp tiếp theo, hệ thống sẽ bổ sung cơ chế Persistence cho metadata quản lý (ví dụ: SQLite hoặc RDBMS) để đảm bảo tính đồng bộ bền vững hoàn toàn giữa tầng Quan hệ và tầng Vector Store.
+
 ---
 
 ## 4. Đặc tả Pipeline theo từng Phase (Chained Phase Specifications)
@@ -306,7 +317,8 @@ QueryWorkspace(workspace_id: string, query_text: string, top_k: integer = 5)
    - Cửa sổ trượt cố định (Flat-Window Chunking).
    - Truy xuất Vector đơn thuần (Jina Dense Retrieval) + Phân vùng Workspace.
    - Sinh phản hồi với DeepSeek v4 Flash.
-2. **Vòng lặp 2 (Nâng cấp Cấu trúc & Ngữ nghĩa - Semantic Chunking)**:
+2. **Vòng lặp 2 (Nâng cấp Cấu trúc & Ngữ nghĩa - Semantic Chunking & Metadata Persistence)**:
+   - Lưu trữ bền vững Metadata Workspace/Book qua SQLite/RDBMS để loại trừ rủi ro dữ liệu mồ côi khi restart service.
    - Trích xuất Mục lục (TOC Extraction) & Phân tích cấu trúc phân cấp Chương/Mục.
    - Phân mảnh theo ranh giới ngữ nghĩa của sách.
 3. **Vòng lặp 3 (Nâng cấp Tìm kiếm Lai & Tái xếp hạng - Hybrid Search & Reranking)**:

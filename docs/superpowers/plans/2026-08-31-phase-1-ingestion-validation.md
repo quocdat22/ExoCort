@@ -297,6 +297,11 @@ from typing import Dict, List, Optional, Set
 from exocort.core.models import Workspace
 
 class WorkspaceManager:
+    """In-memory workspace manager for baseline MVP.
+    
+    Note: Workspace and book metadata are held in RAM for the MVP baseline.
+    Persistent storage (e.g. SQLite/RDBMS) is planned for subsequent iterations.
+    """
     def __init__(self):
         self._workspaces: Dict[str, Workspace] = {}
         self._workspace_books: Dict[str, Set[str]] = {}
