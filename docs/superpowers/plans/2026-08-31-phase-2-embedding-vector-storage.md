@@ -209,7 +209,7 @@ git commit -m "feat(phase-2): add scoped vector store engine with chromadb"
 
 ---
 
-### Task 2: Jina AI Embedding Client with Batch Processing
+### Task 2: Jina AI Embedding Client with Dual Resilience Profile & Throttling
 
 **Files:**
 - Create: `src/exocort/embedding/jina_client.py`
@@ -217,7 +217,7 @@ git commit -m "feat(phase-2): add scoped vector store engine with chromadb"
 
 **Interfaces:**
 - Consumes: `RAGConfig` from `exocort.core.config`
-- Produces: `JinaEmbeddingClient.embed_texts()`
+- Produces: `JinaEmbeddingClient.embed_texts()`, `JinaEmbeddingClient.embed_query()`
 
 - [ ] **Step 1: Write failing unit test**
 
@@ -225,15 +225,17 @@ git commit -m "feat(phase-2): add scoped vector store engine with chromadb"
 # tests/embedding/test_jina_client.py
 import pytest
 from unittest.mock import AsyncMock, patch
+from pydantic import SecretStr
 from exocort.embedding.jina_client import JinaEmbeddingClient
 from exocort.core.config import RAGConfig
 
 @pytest.mark.asyncio
-async def test_jina_client_batching():
+async def test_jina_client_batching_and_throttling():
     config = RAGConfig(
         embedding_model="jina-embeddings-v5-omni-small",
         embedding_batch_size=2,
-        jina_api_key="mock_key"
+        jina_api_key=SecretStr("mock_key"),
+        inter_batch_delay_sec=0.0
     )
     client = JinaEmbeddingClient(config)
 
@@ -244,7 +246,7 @@ async def test_jina_client_batching():
         "data": [{"embedding": [0.5] * 1024}]
     }
 
-    texts = ["text1", "text2", "text3"]  # 3 items -> 2 batches (2 + 1)
+    texts = ["text1", "text2", "text3"]
 
     with patch("httpx.AsyncClient.post") as mock_post:
         mock_post.side_effect = [
@@ -257,6 +259,27 @@ async def test_jina_client_batching():
         assert embeddings[0] == [0.1] * 1024
         assert embeddings[2] == [0.5] * 1024
         assert mock_post.call_count == 2
+
+@pytest.mark.asyncio
+async def test_jina_client_embed_query_fast_profile():
+    config = RAGConfig(
+        jina_api_key=SecretStr("mock_key"),
+        query_embedding_timeout=2.0
+    )
+    client = JinaEmbeddingClient(config)
+
+    mock_resp_payload = {
+        "data": [{"embedding": [0.9] * 1024}]
+    }
+
+    with patch("httpx.AsyncClient.post") as mock_post:
+        mock_post.return_value = AsyncMock(
+            json=lambda: mock_resp_payload,
+            raise_for_status=lambda: None
+        )
+        vec = await client.embed_query("What is inheritance?")
+        assert len(vec) == 1024
+        assert vec[0] == 0.9
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -268,33 +291,56 @@ Expected: FAIL with `ModuleNotFoundError`
 
 ```python
 # src/exocort/embedding/jina_client.py
+import asyncio
 from typing import List
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, wait_fixed
 from exocort.core.config import RAGConfig
 
 class JinaEmbeddingClient:
+    """Client for Jina Embedding API with Dual-Profile Resilience (Patient Ingest vs Agile Query)."""
+
     def __init__(self, config: RAGConfig):
+        self.config = config
         self.model = config.embedding_model
-        self.api_key = config.jina_api_key
+        self.api_key = (
+            config.jina_api_key.get_secret_value()
+            if hasattr(config.jina_api_key, "get_secret_value")
+            else str(config.jina_api_key)
+        )
         self.batch_size = config.embedding_batch_size
         self.api_url = "https://api.jina.ai/v1/embeddings"
+        self.semaphore = asyncio.Semaphore(config.max_concurrent_embedding_batches)
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=30))
-    async def _embed_batch(self, texts: List[str]) -> List[List[float]]:
+    @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=2, max=30))
+    async def _embed_batch_patient(self, texts: List[str]) -> List[List[float]]:
+        """Patient retry profile for offline batch ingestion."""
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            payload = {
-                "model": self.model,
-                "input": texts
-            }
+        async with self.semaphore:
+            async with httpx.AsyncClient(timeout=self.config.ingestion_embedding_timeout) as client:
+                payload = {"model": self.model, "input": texts}
+                resp = await client.post(self.api_url, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+                return [item["embedding"] for item in data.get("data", [])]
+
+    @retry(stop=stop_after_attempt(2), wait=wait_fixed(0.5))
+    async def embed_query(self, query: str) -> List[float]:
+        """Fast agile profile for interactive query-time search."""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        async with httpx.AsyncClient(timeout=self.config.query_embedding_timeout) as client:
+            payload = {"model": self.model, "input": [query]}
             resp = await client.post(self.api_url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            return [item["embedding"] for item in data.get("data", [])]
+            embeddings = [item["embedding"] for item in data.get("data", [])]
+            return embeddings[0] if embeddings else [0.0] * self.config.embedding_dimension
 
     async def embed_texts(self, texts: List[str]) -> List[List[float]]:
         if not texts:
@@ -303,8 +349,10 @@ class JinaEmbeddingClient:
         all_embeddings: List[List[float]] = []
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i:i + self.batch_size]
-            batch_embeddings = await self._embed_batch(batch)
+            batch_embeddings = await self._embed_batch_patient(batch)
             all_embeddings.extend(batch_embeddings)
+            if self.config.inter_batch_delay_sec > 0:
+                await asyncio.sleep(self.config.inter_batch_delay_sec)
 
         return all_embeddings
 ```
@@ -318,5 +366,5 @@ Expected: PASS
 
 ```bash
 git add src/exocort/embedding/ tests/embedding/
-git commit -m "feat(phase-2): add Jina embedding client with batching and retry"
+git commit -m "feat(phase-2): add Jina embedding client with dual resilience profiles and throttling"
 ```

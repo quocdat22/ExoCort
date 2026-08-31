@@ -3,7 +3,7 @@
 ## 1. Tổng quan Dự án (Executive Summary)
 Dự án **E-Book RAG Engine** là hệ thống hỏi đáp và truy xuất thông tin thông minh trên tập tài liệu sách điện tử (E-books). Hệ thống cho phép người dùng tổ chức sách theo từng Không gian làm việc (Workspace / Project), thực hiện các truy vấn ngữ nghĩa trong phạm vi cô lập và nhận câu trả lời chính xác có đính kèm số trang trích dẫn.
 
-Tài liệu này đóng vai trò là **High-Level Design (HLD) & Functional Specification**, duy trì góc nhìn **Hộp đen (Black-box)** và **Độc lập ngôn ngữ (Code-agnostic)**, tập trung vào luồng dữ liệu, hợp đồng giao diện, cấu hình tham số và tiêu chí thành công theo từng Phase. Toàn bộ môi trường phát triển và thực thi dự án được chuẩn hóa quản lý bởi công cụ **`uv`**.
+Tài liệu này đóng vai trò là **High-Level Design (HLD) & Functional Specification**, duy trì góc nhìn **Hộp đen (Black-box)** và **Độc lập ngôn ngữ (Code-agnostic)**, tập trung vào luồng dữ liệu, hợp đồng giao diện, cấu hình tham số, chính sách phục hồi lỗi (Resilience), quản trị chi phí và tiêu chí thành công theo từng Phase. Toàn bộ môi trường phát triển và thực thi dự án được chuẩn hóa quản lý bởi công cụ **`uv`**.
 
 ---
 
@@ -14,26 +14,34 @@ Tài liệu này đóng vai trò là **High-Level Design (HLD) & Functional Spec
 * **Định dạng tài liệu hỗ trợ (MVP)**:
   - Chỉ hỗ trợ định dạng **Digital PDF** (có lớp văn bản - text layer hợp lệ).
   - Ngôn ngữ tài liệu: **Tiếng Anh (English)**.
-  - Xử lý PDF dạng Scan: Hệ thống **từ chối tiếp nhận** và hiển thị thông báo không hỗ trợ rõ ràng trong giai đoạn MVP.
-* **Mô hình Trích dẫn (Citation Model)**: Mức tài liệu gồm **Tên sách (Book Title)** + **Số trang (Page Number)**.
-* **Mô hình Không gian làm việc (Workspace Scoping)**: Người dùng có thể tạo các Workspace độc lập, phân loại sách vào từng Workspace; mọi truy vấn đều được giới hạn trong phạm vi Workspace đã chọn.
+  - Xử lý PDF dạng Scan: Hệ thống **từ chối tiếp nhận** và hiển thị thông báo không hỗ trợ rõ ràng trong giai đoạn MVP (`ERR_UNSUPPORTED_SCANNED_PDF`).
+* **Mô hình Trích dẫn (Citation Model)**: Mức tài liệu gồm **Tên sách (Book Title)** + **Số trang (Page Number / Page Range)**.
+* **Mô hình Không gian làm việc & Định danh Sách (Workspace Scoping & Book Uniqueness)**:
+  - Người dùng có thể tạo các Workspace độc lập, phân loại sách vào từng Workspace; mọi truy vấn đều được giới hạn trong phạm vi Workspace đã chọn.
+  - Tên sách (`book_title`) là duy nhất trong phạm vi từng Workspace. Hai Workspace khác nhau có thể chứa sách cùng tên.
+  - Nạp lại sách trùng tên trong cùng Workspace phải tuân thủ chính sách **Deduplication & Re-ingestion Policy** (chặn trùng mặc định hoặc ghi đè có dọn dẹp sạch vector cũ khi có cờ `overwrite=true`).
 * **Nhà cung cấp & Mô hình AI**:
   - **Mô hình Sinh ngôn ngữ (LLM)**: `deepseek/deepseek-v4-flash-0731` thông qua nhà cung cấp **OpenRouter**.
   - **Mô hình Nhúng Vector (Embedding)**: `jina-embeddings-v5-omni-small` thông qua nhà cung cấp **Jina AI**.
+* **Quản trị Bảo mật & Khóa Bí mật (Secrets & Credential Management)**:
+  - Các API key (`JINA_API_KEY`, `OPENROUTER_API_KEY`) được nạp tự động qua biến môi trường hoặc tệp `.env` sử dụng kiểu dữ liệu `SecretStr` để chống rò rỉ vào log, print hoặc payload exception.
+  - Hệ thống áp dụng cơ chế **Fail-fast Validation** khi khởi tạo nếu thiếu API key (`ERR_MISSING_API_KEY`).
+* **Hạn mức Tài nguyên & Kiểm soát Chi phí (Cost Guardrails)**:
+  - Giới hạn độ dài tài liệu tối đa: `max_pages_per_book = 1000 trang`, `max_chunks_per_book = 3000 chunks` nhằm ngăn ngừa cạn kiệt ngân sách token.
 
 ---
 
 ## 3. Kiến trúc Tổng thể & Mô hình Thực thể (System Architecture & Entity Model)
 
-### 3.1. Sơ đồ Kiến trúc Hộp đen (Black-box Architecture)
+#### 3.1. Sơ đồ Kiến trúc Hộp đen (Black-box Architecture)
 
 ```
                        +---------------------------------------+
                        |           NGƯỜI DÙNG / CLIENT         |
                        +---------------------------------------+
-                                   |                 |
-                    (Quản lý Sách & Workspace)    (Truy vấn theo ngữ cảnh)
-                                   v                 v
+                                    |                 |
+                     (Quản lý Sách & Workspace)    (Truy vấn theo ngữ cảnh)
+                                    v                 v
 +----------------------------------------------------------------------------------+
 |                          E-BOOK RAG ENGINE (Managed by uv)                       |
 |                                                                                  |
@@ -44,7 +52,8 @@ Tài liệu này đóng vai trò là **High-Level Design (HLD) & Functional Spec
 +----------------------------------------------------------------------------------+
            |                                                 |
            v                                                 v
-   [OpenRouter / DeepSeek API]                      [Jina AI Embedding API]
+    [OpenRouter / DeepSeek API]                      [Jina AI Embedding API]
+    (Timeout: 5.0s, Fast Retry: 2x)                  (Ingest: 45s, Query: 2.0s)
 ```
 
 ### 3.2. Mô hình Thực thể Dữ liệu (Entity Domain Model)
@@ -92,12 +101,13 @@ erDiagram
 ### 3.3. Chiến lược Lưu trữ & Ranh giới Persistence (Persistence & Storage Strategy)
 
 * **Tầng Vector Storage (Scoped Vector Store)**:
-  - Sử dụng **ChromaDB persistent** (`./chroma_data`) để lưu trữ các bản ghi `VECTOR_RECORD` và metadata chunk (`workspace_id`, `book_id`, `page_start`, `page_end`, `text_content`).
+  - Sử dụng **ChromaDB persistent** (`./chroma_data`) để lưu trữ các bản ghi `VECTOR_RECORD` và metadata chunk (`workspace_id`, `book_id`, `book_title`, `page_start`, `page_end`, `text_content`, `chunk_index`).
   - Dữ liệu vector được lưu bền vững trên ổ đĩa và tồn tại qua các lần restart hệ thống.
+  - Cung cấp cơ chế xóa sạch triệt để theo sách `delete_by_book(book_id)` để phục vụ quy trình Atomic Replacement khi ghi đè sách.
 
 * **Tầng Quản trị Metadata (Workspace & Book Metadata)**:
-  - **Baseline MVP**: Được quản lý **In-Memory** (`WorkspaceManager` lưu trữ qua cấu trúc `dict` trong RAM) để tối giản phạm vi và độ phức tạp khởi đầu.
-  - **Lưu ý Kiến trúc & Rủi ro Dữ liệu Mồ côi (Architectural Note & Orphan Data Risk)**: Do metadata quản lý không được lưu xuống đĩa trong giai đoạn MVP, khi service/process khởi động lại, danh sách Workspace/Book trong RAM sẽ bị xóa sạch trong khi các bản ghi vector tương ứng vẫn tồn tại trong ChromaDB. Điều này dẫn đến tình trạng các vector record cũ bị "mồ côi" (orphan records) nếu người dùng truy vấn theo `workspace_id` đã bị mất ở tầng quản trị.
+  - **Baseline MVP**: Được quản lý **In-Memory** (`WorkspaceManager` lưu trữ danh mục `Workspace` và `BookMetadata` qua `dict` trong RAM) để tối giản phạm vi và độ phức tạp khởi đầu.
+  - **Lưu ý Kiến trúc & Rủi ro Dữ liệu Mồ côi (Architectural Note & Orphan Data Risk)**: Do metadata quản lý không được lưu xuống đĩa trong giai đoạn MVP, khi service/process khởi động lại, danh sách Workspace/Book trong RAM sẽ bị xóa sạch trong khi các bản ghi vector tương ứng vẫn tồn tại trong ChromaDB.
   - **Hướng xử lý & Lộ trình (Roadmap Evolution)**: Ở Vòng lặp tiếp theo, hệ thống sẽ bổ sung cơ chế Persistence cho metadata quản lý (ví dụ: SQLite hoặc RDBMS) để đảm bảo tính đồng bộ bền vững hoàn toàn giữa tầng Quan hệ và tầng Vector Store.
 
 ---
@@ -108,28 +118,30 @@ Hệ thống được chia thành 4 Phase phát triển tuần tự. Đầu ra c
 
 ```mermaid
 flowchart TD
-    subgraph Phase1["PHASE 1: Ingestion & Validation"]
-        A[File PDF + Workspace ID] --> B[Validation: Scan Detection]
-        B -- Hợp lệ --> C[Text Extraction & Cleaning]
-        C --> D[Flat-Window Chunking + Metadata Tagging]
+    subgraph Phase1["PHASE 1: Ingestion, Validation & Scoping"]
+        A[File PDF + Workspace ID + Book Title + Overwrite Flag] --> B[Validation: Page Cap & Scan Detection]
+        B -- Hợp lệ --> C[Deduplication Check: overwrite flag]
+        C --> D[Text Extraction & Cleaning]
+        D --> E[Flat-Window Chunking + Metadata Tagging]
     end
 
-    subgraph Phase2["PHASE 2: Embedding & Storage"]
-        D -->|Output: Normalized Chunks Collection| E[Batch Embedding: Jina v5 Omni Small]
-        E --> F[Vector DB Indexing với Scoped Filter]
+    subgraph Phase2["PHASE 2: Batch Embedding & Vector Storage"]
+        E -->|Output: Normalized Chunks Collection| F[Batch Grouping: 32 chunks]
+        F --> G[Patient Batch Embedding: Jina v5 with Semaphore & Backoff]
+        G --> H[Vector DB Indexing với Scoped Filter]
     end
 
-    subgraph Phase3["PHASE 3: Scoped Retrieval & Generation"]
-        G[User Query + Workspace ID] --> H[Query Embedding: Jina]
-        F -.->|Chỉ mục sẵn sàng| I[Dense Vector Retrieval: Top-K]
-        H --> I
-        I --> J[Prompt Augmentation + DeepSeek v4 Flash]
-        J --> K[Response + Citations]
+    subgraph Phase3["PHASE 3: Scoped Retrieval, Fast Generation & Resilience"]
+        I[User Query + Workspace ID] --> J[Fast Query Embedding: Jina - Timeout 2s]
+        H -.->|Chỉ mục sẵn sàng| K[Dense Vector Retrieval: Top-K]
+        J --> K
+        K --> L[Prompt Augmentation + DeepSeek v4 Flash - Timeout 5s]
+        L --> M[Response + Citations / Partial Fallback]
     end
 
-    subgraph Phase4["PHASE 4: Baseline Benchmark & Evaluation"]
-        K -.->|Output: Test Run Pipeline| L[Evaluation Engine: Faithfulness, Recall@K, Latency]
-        L --> M[Baseline Performance Report]
+    subgraph Phase4["PHASE 4: Baseline Benchmark & SLA Evaluation"]
+        M -.->|Output: Test Run Pipeline| N[Evaluation Engine: Faithfulness, Recall@K, P95/P99 Latency]
+        N --> O[Baseline Performance & Cost Report]
     end
 ```
 
@@ -137,63 +149,94 @@ flowchart TD
 
 ### 4.1. PHASE 1: Tiếp nhận, Kiểm định & Phân mảnh Dữ liệu (Ingestion & Validation)
 
-* **Mục tiêu**: Xử lý và chuyển đổi file PDF thành các khối văn bản chuẩn hóa, loại trừ PDF scan không hợp lệ.
+* **Mục tiêu**: Kiểm tra tính hợp lệ về độ dài, định dạng, trùng lặp và chuyển đổi file PDF thành các khối văn bản chuẩn hóa, loại trừ PDF scan hoặc tài liệu vượt hạn mức.
 * **Đầu vào (Input)**:
-  - File tài liệu PDF (dạng nhị phân / luồng dữ liệu).
+  - File tài liệu PDF (dạng nhị phân / luồng dữ liệu `bytes`).
   - `workspace_id`: Mã định danh không gian làm việc.
   - `book_title`: Tên sách.
+  - `overwrite`: Cờ cho phép ghi đè sách trùng tên (`bool`, mặc định `false`).
 * **Xử lý Chức năng (Functional Processing)**:
-  1. *Validation Gate*: Đo mật độ ký tự văn bản có nghĩa trên mỗi trang. Nếu tỷ lệ trang hợp lệ (≥ 50 ký tự/trang) thấp hơn 50% tổng số trang, lập tức từ chối và trả về mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
-  2. *Text Extraction*: Trích xuất toàn bộ văn bản theo từng trang, lưu giữ ranh giới trang (character offset).
-  3. *Cross-page Flat-Window Chunking*: Nối toàn bộ văn bản các trang thành chuỗi liên tục, phân đoạn bằng cửa sổ trượt token-based (`tiktoken`, encoding `cl100k_base`), ánh xạ ngược vị trí trang qua character offset:
+  1. *Workspace Existence Check*: Kiểm tra `workspace_id` có tồn tại không. Nếu không, từ chối với mã lỗi `ERR_WORKSPACE_NOT_FOUND`.
+  2. *Deduplication Gate*: Kiểm tra xem sách cùng `book_title` đã tồn tại trong Workspace chưa.
+     - Nếu đã tồn tại và `overwrite == false`: Lập tức từ chối với mã lỗi `ERR_DUPLICATE_BOOK_TITLE`.
+     - Nếu đã tồn tại và `overwrite == true`: Đánh dấu `old_book_id` để thực hiện Atomic Replacement (xóa vector cũ ở Phase 2).
+  3. *Page Cap Validation Gate*: Đếm số trang PDF. Nếu vượt quá `max_pages_per_book` (1,000 trang), từ chối với mã lỗi `ERR_DOCUMENT_TOO_LARGE`.
+  4. *Scan Detection Gate*: Đo mật độ ký tự văn bản có nghĩa trên mỗi trang. Nếu tỷ lệ trang hợp lệ (≥ 50 ký tự/trang) thấp hơn 50% tổng số trang, lập tức từ chối với mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
+  5. *Text Extraction*: Trích xuất toàn bộ văn bản theo từng trang, lưu giữ ranh giới trang (character offset).
+  6. *Cross-page Flat-Window Chunking*: Nối toàn bộ văn bản các trang thành chuỗi liên tục, phân đoạn bằng cửa sổ trượt token-based (`tiktoken`, encoding `cl100k_base`), ánh xạ ngược vị trí trang qua character offset:
      - Kích thước khối (Chunk Size): `512 tokens`.
      - Độ gối đầu (Chunk Overlap): `50 tokens` (~10%).
-  4. *Metadata Binding*: Đóng gói mỗi chunk thành một thực thể có cấu trúc kèm thông tin định danh, gồm `page_start` và `page_end` (hỗ trợ chunk liên trang).
+     - Nếu tổng số chunk > `max_chunks_per_book` (3,000 chunks), từ chối với mã lỗi `ERR_DOCUMENT_TOO_LARGE`.
+  7. *Metadata Binding*: Đóng gói mỗi chunk thành một thực thể có cấu trúc kèm thông tin định danh (`book_title`, `workspace_id`, `page_start`, `page_end`, `chunk_index`).
 * **Đầu ra (Output)**: **Normalized Chunks Collection** (Tập hợp các chunk chuẩn hóa kèm metadata).
 * **Tiêu chí Hoàn thành (DoD)**:
-  - 100% file PDF scan bị từ chối với thông báo chuẩn.
+  - 100% file PDF scan bị từ chối với mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
+  - 100% file vượt quá 1,000 trang bị từ chối với mã lỗi `ERR_DOCUMENT_TOO_LARGE`.
+  - Sách trùng tên bị chặn khi `overwrite=false` và được xử lý thay thế sạch sẽ khi `overwrite=true`.
   - 100% chunk được gán đúng `workspace_id`, `book_title`, `page_start`, `page_end`.
 
 ---
 
-### 4.2. PHASE 2: Số hóa Vector & Lưu trữ Chỉ mục (Embedding & Vector Storage)
+### 4.2. PHASE 2: Số hóa Vector & Lưu trữ Chỉ mục (Batch Embedding & Vector Storage)
 
-* **Mục tiêu**: Chuyển đổi các khối văn bản thành vector không gian ngữ nghĩa và lưu trữ có phân vùng theo Workspace.
+* **Mục tiêu**: Chuyển đổi các khối văn bản thành vector ngữ nghĩa thông qua Jina AI với cơ chế điều tiết lưu lượng (Throttling) và lưu trữ có phân vùng theo Workspace vào ChromaDB.
 * **Đầu vào (Input)**:
   - Normalized Chunks Collection từ **Phase 1**.
+  - `old_book_id` (nếu đang thực hiện ghi đè sách).
 * **Xử lý Chức năng (Functional Processing)**:
-  1. *Batch Grouping*: Gom nhóm các chunk thành từng lô (Batch Size = 32 chunks).
-  2. *Vector Embedding*: Gửi văn bản tới mô hình `jina-embeddings-v5-omni-small` để tạo vector đặc trưng (Dense Vectors).
-  3. *Scoped Vector Indexing*: Ghi dữ liệu vào Vector Database. Cấu hình bảng chỉ mục cho phép lọc dữ liệu (Filtered Search) dựa trên trường `workspace_id`.
-* **Đầu ra (Output)**: **Scoped Vector Index** (Chỉ mục Vector sẵn sàng nhận các truy vấn tìm kiếm).
+  1. *Atomic Cleanup (khi ghi đè)*: Nếu có `old_book_id`, thực hiện `vector_store.delete_by_book(old_book_id)` để xóa triệt để các vector cũ trước khi nạp mới.
+  2. *Batch Grouping & Throttling*: Gom nhóm các chunk thành từng lô (Batch Size = 32 chunks). Áp dụng `asyncio.Semaphore(max_concurrency=4)` và giãn cách `inter_batch_delay_sec = 0.05s` để tránh chạm trần Rate Limit (RPM/TPM) của Jina AI.
+  3. *Resilient Batch Embedding (Patient Retry Profile)*:
+     - Gửi văn bản tới mô hình `jina-embeddings-v5-omni-small`.
+     - Cấu hình Retry: Tối đa 4 lần thử, Exponential backoff ($min=2s, max=30s$), `httpx` timeout = $45.0s$.
+     - Nếu thất bại sau khi hết số lần retry: Bắt ngoại lệ và trả về `IngestionResult` với `status=FAILED` và mã lỗi `ERR_UPSTREAM_EMBEDDING_FAILED`, không đăng ký sách vào `WorkspaceManager` (đảm bảo tính toàn vẹn trạng thái).
+  4. *Scoped Vector Indexing*: Ghi dữ liệu vào ChromaDB kèm metadata phân vùng `workspace_id`.
+  5. *State Registration*: Cập nhật `BookMetadata` vào `WorkspaceManager`.
+* **Đầu ra (Output)**: **Scoped Vector Index** & **IngestionResult**.
 * **Tiêu chí Hoàn thành (DoD)**:
   - Tỷ lệ hoàn thành nhúng vector đạt 100% trên các chunk hợp lệ.
   - Tốc độ lập chỉ mục đạt tối thiểu $\ge$ 50 trang PDF/phút.
+  - Không làm sập ứng dụng khi Jina API gặp lỗi (trả về `IngestionResult` lỗi rõ ràng).
 
 ---
 
 ### 4.3. PHASE 3: Truy xuất có Phạm vi & Sinh phản hồi (Scoped Retrieval & Generation)
 
-* **Mục tiêu**: Tìm kiếm các đoạn trích liên quan nhất trong Workspace chỉ định và sinh câu trả lời có trích dẫn nguồn.
+* **Mục tiêu**: Tìm kiếm các đoạn trích liên quan nhất trong Workspace chỉ định và sinh câu trả lời có trích dẫn nguồn, với cam kết SLA nghiêm ngặt và cơ chế Graceful Degradation.
 * **Đầu vào (Input)**:
   - Câu hỏi của người dùng (`query_text`).
   - `workspace_id`: Mã không gian làm việc cần tra cứu.
   - Scoped Vector Index từ **Phase 2**.
 * **Xử lý Chức năng (Functional Processing)**:
-  1. *Query Embedding*: Vector hóa câu hỏi bằng `jina-embeddings-v5-omni-small`.
-  2. *Scoped Dense Retrieval*: Truy vấn Top-K ($K=5$) chunk có độ tương đồng Cosine cao nhất, áp dụng bộ lọc cứng `workspace_id = <target_workspace>`.
-  3. *Context Augmentation*: Đóng gói Top-K chunks thành khối ngữ cảnh (Context Block) kèm định danh Tên sách và Số trang.
-  4. *Inference*: Gửi Prompt và Ngữ cảnh tới mô hình `deepseek/deepseek-v4-flash-0731` qua OpenRouter với chỉ thị sinh câu trả lời khách quan, không bịa đặt và dẫn nguồn chuẩn xác.
-* **Đầu ra (Output)**: **Grounded Answer & Citation List** (Nội dung trả lời và danh sách `[Tên sách - Số trang]`).
-* **Tiêu chí Hoàn thành (DoD)**:
+  1. *Workspace Validation*: Kiểm tra `workspace_id` có tồn tại không. Nếu không, trả về `QueryResult` lỗi với `ERR_WORKSPACE_NOT_FOUND`.
+  2. *Fast Query Embedding (Agile Retry Profile)*:
+     - Vector hóa câu hỏi bằng `jina-embeddings-v5-omni-small`.
+     - Cấu hình Timeout: $2.0s$, Fast Retry: Tối đa 2 lần thử (1 initial + 1 retry với backoff $0.5s$).
+     - Nếu lỗi: Trả về `QueryResult(status=FAILED, error_code="ERR_UPSTREAM_EMBEDDING_FAILED")`.
+  3. *Scoped Dense Retrieval*: Truy vấn Top-K ($K=5$) chunk có độ tương đồng Cosine cao nhất trong ChromaDB với bộ lọc `workspace_id = <target_workspace>`.
+     - Nếu không tìm thấy chunk nào trong Workspace: Trả về `QueryResult(status=SUCCESS, answer="No relevant context found in this workspace.", citations=[])`.
+  4. *Context Augmentation*: Đóng gói Top-K chunks thành khối ngữ cảnh (Context Block) kèm định danh Tên sách và Số trang.
+  5. *Fast LLM Inference & Partial Grounding Fallback*:
+     - Gửi Prompt tới mô hình `deepseek/deepseek-v4-flash-0731` qua OpenRouter.
+     - Cấu hình Timeout: $5.0s$, Fast Retry: Tối đa 2 lần thử (backoff $0.5s$).
+     - **Graceful Degradation (Partial Fallback)**: Nếu LLM API lỗi sau khi hết retry nhưng bước Retrieval đã thành công, hệ thống trả về:
+       - `status = PARTIAL`
+       - `error_code = "ERR_UPSTREAM_GENERATION_FAILED"`
+       - `answer = "Dịch vụ tổng hợp câu trả lời tạm thời gián đoạn. Dưới đây là các đoạn trích liên quan nhất được tìm thấy từ tài liệu của bạn."`
+       - `citations = <danh sách Top-K chunks tìm được>`
+* **Đầu ra (Output)**: **QueryResult** (Nội dung trả lời, trích dẫn, trạng thái và telemetry metrics).
+* **Cam kết Tiêu chí SLA & Hoàn thành (DoD)**:
   - 100% câu trả lời chỉ sử dụng dữ liệu trong Workspace được chỉ định (cô lập hoàn toàn).
-  - Độ trễ phản hồi (End-to-End Latency) $\le$ 2.5 giây/câu hỏi.
+  - **Happy Path Latency (P95 SLA)**: $\le 2.5\text{s}$ (khi mạng và các API bên thứ 3 phản hồi bình thường).
+  - **Worst-Case with Fast Retry (P99 SLA)**: $\le 8.0\text{s}$.
+  - **Hard Timeout Budget**: $\le 8.0\text{s}$ (tự ngắt và fail-fast trả về `ERR_QUERY_TIMEOUT` nếu vượt ngưỡng).
+  - 100% các lỗi API bên thứ 3 được chuyển thành `QueryResult` có cấu trúc rõ ràng, không văng unhandled exception.
 
 ---
 
 ### 4.4. PHASE 4: Đánh giá & Thiết lập Điểm chuẩn Baseline (Evaluation & Benchmarking)
 
-* **Mục tiêu**: Đo lường và định lượng chất lượng của hệ thống Baseline để làm căn cứ cho các cải tiến tiếp theo.
+* **Mục tiêu**: Đo lường và định lượng chất lượng, độ trễ và chi phí của hệ thống Baseline.
 * **Đầu vào (Input)**:
   - Tập dữ liệu kiểm thử chuẩn (Golden Evaluation Set gồm tối thiểu 30 câu hỏi Q&A có đáp án và vị trí trang mẫu).
   - Pipeline hoàn chỉnh từ **Phase 1 $\rightarrow$ Phase 3**.
@@ -202,37 +245,49 @@ flowchart TD
   2. Thu thập và tính toán các chỉ số:
      - **Retrieval Recall@5**: Tỷ lệ câu hỏi mà trang chứa thông tin cần tìm xuất hiện trong Top-5 chunk truy xuất.
      - **Answer Faithfulness**: Tỷ lệ thông tin trong câu trả lời có bằng chứng trực tiếp từ ngữ cảnh trích xuất.
-     - **Latency & Token Consumption**: Thời gian trung bình và số lượng token tiêu thụ mỗi lượt truy vấn.
+     - **Latency Percentiles (P50, P95, P99)**: Phân bố thời gian phản hồi ở từng phân vị.
+     - **Token Consumption & Estimated Cost**: Thống kê số lượng token input/output và ước tính chi phí API.
 * **Đầu ra (Output)**: **Baseline Performance Report** (Báo cáo đo lường chất lượng hệ thống).
 * **Tiêu chí Hoàn thành (DoD)**:
   - **Retrieval Recall@5** $\ge$ 70%.
   - **Faithfulness Score** $\ge$ 85%.
+  - **P95 Latency** $\le 2.5s$.
   - Xuất bản tài liệu Báo cáo Baseline hoàn chỉnh.
 
 ---
 
-## 5. Bảng Cấu hình Tham số (Black-box Configuration Parameters)
+## 5. Bảng Cấu hình Tham số Hệ thống (System Configuration Parameters)
 
-| Mô-đun | Tham số | Giá trị Cấu hình | Mục đích |
+| Phân hệ / Mô-đun | Tham số | Giá trị Mặc định | Mục đích & Ý nghĩa |
 | :--- | :--- | :--- | :--- |
 | **Ingestion** | `chunk_size` | `512 tokens` | Kích thước phân đoạn văn bản cố định |
 | **Ingestion** | `chunk_overlap` | `50 tokens` | Độ gối đầu giữ liền mạch ngữ nghĩa giữa các chunk |
-| **Ingestion** | `tokenizer` | `cl100k_base (tiktoken)` | Bộ mã hóa token cho phân đoạn chính xác |
-| **Validation** | `min_text_density` | `50 chars/page` | Ngưỡng phát hiện và từ chối file PDF Scan |
-| **Validation** | `min_valid_page_ratio` | `0.5 (50%)` | Tỷ lệ trang hợp lệ tối thiểu để chấp nhận PDF |
-| **Embedding** | `model_name` | `jina-embeddings-v5-omni-small` | Mô hình trích xuất vector đặc trưng |
-| **Embedding** | `embedding_dimension` | `1024` | Số chiều vector đặc trưng do mô hình Jina sinh ra |
-| **Embedding** | `batch_size` | `32` | Số lượng chunk trong một lượt gọi API |
-| **Vector DB** | `distance_metric` | `Cosine` | Thang đo độ tương đồng góc giữa các vector |
-| **Vector DB** | `persist_dir` | `./chroma_data` | Thư mục lưu trữ ChromaDB persistent |
-| **Retrieval** | `top_k` | `5` | Số lượng đoạn trích liên quan nhất đưa vào Context |
-| **Generation** | `model_name` | `deepseek/deepseek-v4-flash-0731` | Mô hình sinh ngôn ngữ tự nhiên qua OpenRouter |
-| **Generation** | `temperature` | `0.1` | Thiết lập tính xác thực cao, hạn chế sáng tạo |
-| **Generation** | `max_tokens` | `1024` | Độ dài phản hồi tối đa của câu trả lời |
+| **Ingestion** | `tokenizer_encoding` | `cl100k_base (tiktoken)` | Bộ mã hóa token cho phân đoạn chính xác |
+| **Validation / Guardrails** | `min_text_density_per_page` | `50 chars/page` | Ngưỡng phát hiện và từ chối file PDF Scan |
+| **Validation / Guardrails** | `min_valid_page_ratio` | `0.5 (50%)` | Tỷ lệ trang hợp lệ tối thiểu để chấp nhận PDF |
+| **Validation / Guardrails** | `max_pages_per_book` | `1000 pages` | Giới hạn số trang tối đa cho 1 cuốn sách để kiểm soát chi phí |
+| **Validation / Guardrails** | `max_chunks_per_book` | `3000 chunks` | Giới hạn số lượng chunk tối đa cho 1 cuốn sách |
+| **Batch Embedding (Ingest)** | `embedding_model` | `jina-embeddings-v5-omni-small` | Mô hình trích xuất vector đặc trưng |
+| **Batch Embedding (Ingest)** | `embedding_dimension` | `1024` | Số chiều vector đặc trưng do mô hình Jina sinh ra |
+| **Batch Embedding (Ingest)** | `embedding_batch_size` | `32` | Số lượng chunk trong một lượt gọi API nhúng theo lô |
+| **Batch Embedding (Ingest)** | `ingestion_embedding_timeout` | `45.0s` | HTTP Timeout cho mỗi request nhúng theo lô |
+| **Batch Embedding (Ingest)** | `ingestion_max_retries` | `4` | Số lần thử lại tối đa cho luồng nạp sách (Patient Retry) |
+| **Batch Embedding (Ingest)** | `max_concurrent_embedding_batches` | `4` | Giới hạn concurrency gọi API Jina đồng thời (Semaphore) |
+| **Batch Embedding (Ingest)** | `inter_batch_delay_sec` | `0.05s` | Giãn cách giữa các batch để tránh chạm trần RPM/TPM Rate Limit |
+| **Vector DB Storage** | `distance_metric` | `Cosine` | Thang đo độ tương đồng góc giữa các vector |
+| **Vector DB Storage** | `chroma_persist_dir` | `./chroma_data` | Thư mục lưu trữ ChromaDB persistent |
+| **Retrieval & Query** | `top_k` | `5` | Số lượng đoạn trích liên quan nhất đưa vào Context |
+| **Retrieval & Query** | `query_embedding_timeout` | `2.0s` | HTTP Timeout cho vector hóa câu hỏi người dùng (Fast-Fail) |
+| **Generation (LLM)** | `llm_model` | `deepseek/deepseek-v4-flash-0731` | Mô hình sinh ngôn ngữ tự nhiên qua OpenRouter |
+| **Generation (LLM)** | `llm_temperature` | `0.1` | Thiết lập tính xác thực cao, hạn chế sáng tạo/ảo giác |
+| **Generation (LLM)** | `llm_max_tokens` | `1024` | Độ dài phản hồi tối đa của câu trả lời |
+| **Generation (LLM)** | `query_generation_timeout` | `5.0s` | HTTP Timeout cho bước sinh câu trả lời qua LLM |
+| **Query Resilience** | `query_max_retries` | `2` | Số lần thử tối đa cho luồng tương tác realtime (Agile Retry) |
+| **Query Resilience** | `query_total_timeout_budget` | `8.0s` | Ngân sách thời gian tối đa cho toàn bộ lượt truy vấn (Hard Limit) |
 
 ---
 
-## 6. Đặc tả Giao diện Chức năng (Functional API Contracts)
+## 6. Đặc tả Giao diện Chức năng & Hợp đồng Dữ liệu (Functional API Contracts)
 
 ### 6.1. Quản lý Không gian làm việc (Workspace Management)
 ```
@@ -248,11 +303,15 @@ AssignBookToWorkspace(workspace_id: string, book_id: string)
 
 ### 6.2. Nạp và Xử lý Sách (Ingestion API)
 ```
-IngestBook(file_payload: binary, workspace_id: string, book_title: string) 
-  -> IngestionResult
+IngestBook(
+    file_payload: binary, 
+    workspace_id: string, 
+    book_title: string, 
+    overwrite: boolean = false
+) -> IngestionResult
 ```
 
-* **Kết quả Thành công**:
+* **Kết quả Thành công (`status = COMPLETED`)**:
 ```json
 {
   "status": "COMPLETED",
@@ -260,30 +319,55 @@ IngestBook(file_payload: binary, workspace_id: string, book_title: string)
   "book_title": "Design Patterns: Elements of Reusable Object-Oriented Software",
   "total_pages": 395,
   "total_chunks_indexed": 1120,
-  "processing_time_sec": 12.8
+  "estimated_total_tokens": 573440,
+  "processing_time_sec": 12.8,
+  "error_code": null,
+  "message": null
 }
 ```
 
-* **Kết quả Từ chối PDF Scan**:
+* **Kết quả Từ chối do Trùng tên Sách (`overwrite = false`)**:
 ```json
 {
   "status": "REJECTED",
-  "error_code": "ERR_UNSUPPORTED_SCANNED_PDF",
-  "message": "Scanned PDF format without valid text layer is not supported in MVP baseline."
+  "error_code": "ERR_DUPLICATE_BOOK_TITLE",
+  "message": "Book with title 'Design Patterns' already exists in workspace 'ws_software_eng_01'. Set overwrite=true to replace."
+}
+```
+
+* **Kết quả Từ chối do PDF Scan hoặc Vượt Hạn mức Trang**:
+```json
+{
+  "status": "REJECTED",
+  "error_code": "ERR_DOCUMENT_TOO_LARGE",
+  "message": "Document contains 1,450 pages, exceeding the maximum allowed limit of 1,000 pages."
+}
+```
+
+* **Kết quả Thất bại do Upstream API (sau khi hết retry)**:
+```json
+{
+  "status": "FAILED",
+  "error_code": "ERR_UPSTREAM_EMBEDDING_FAILED",
+  "message": "Jina AI Embedding service unavailable after 4 retry attempts: HTTP 503 Service Unavailable"
 }
 ```
 
 ### 6.3. Truy vấn Tri thức theo Không gian (Scoped Query API)
 ```
-QueryWorkspace(workspace_id: string, query_text: string, top_k: integer = 5) 
-  -> QueryResult
+QueryWorkspace(
+    workspace_id: string, 
+    query_text: string, 
+    top_k: integer = 5
+) -> QueryResult
 ```
 
-* **Kết quả Trả về**:
+* **Kết quả Thành công (`status = SUCCESS`)**:
 ```json
 {
   "query": "What are the key differences between Factory Method and Abstract Factory?",
   "workspace_id": "ws_software_eng_01",
+  "status": "SUCCESS",
   "answer": "Factory Method uses inheritance and relies on a subclass to handle the desired object instantiation, whereas Abstract Factory is an object-based pattern where a separate factory object is delegated the responsibility of creating families of related or dependent objects without specifying their concrete classes.",
   "citations": [
     {
@@ -301,29 +385,120 @@ QueryWorkspace(workspace_id: string, query_text: string, top_k: integer = 5)
       "text_content": "Abstract Factory provides an interface for creating families of related or dependent objects without specifying their concrete classes..."
     }
   ],
+  "error_code": null,
+  "error_message": null,
   "metrics": {
     "retrieval_time_ms": 115,
     "generation_time_ms": 580,
-    "total_latency_ms": 695
+    "total_latency_ms": 695,
+    "prompt_tokens": 1420,
+    "completion_tokens": 125,
+    "total_tokens": 1545
+  }
+}
+```
+
+* **Kết quả Fallback khi LLM lỗi nhưng Retrieval thành công (`status = PARTIAL`)**:
+```json
+{
+  "query": "What are the key differences between Factory Method and Abstract Factory?",
+  "workspace_id": "ws_software_eng_01",
+  "status": "PARTIAL",
+  "answer": "Dịch vụ tổng hợp câu trả lời tạm thời gián đoạn. Dưới đây là các đoạn trích liên quan nhất được tìm thấy từ tài liệu của bạn.",
+  "citations": [
+    {
+      "book_title": "Design Patterns: Elements of Reusable Object-Oriented Software",
+      "page_start": 87,
+      "page_end": 88,
+      "relevance_score": 0.91,
+      "text_content": "The Factory Method pattern defines an interface for creating an object..."
+    }
+  ],
+  "error_code": "ERR_UPSTREAM_GENERATION_FAILED",
+  "error_message": "OpenRouter DeepSeek API timeout after 2 fast retry attempts.",
+  "metrics": {
+    "retrieval_time_ms": 120,
+    "generation_time_ms": 5005,
+    "total_latency_ms": 5125
+  }
+}
+```
+
+* **Kết quả Thất bại hoàn toàn (`status = FAILED`)**:
+```json
+{
+  "query": "What is the observer pattern?",
+  "workspace_id": "ws_software_eng_01",
+  "status": "FAILED",
+  "answer": "",
+  "citations": [],
+  "error_code": "ERR_UPSTREAM_EMBEDDING_FAILED",
+  "error_message": "Failed to embed query text: Jina API Connection Timeout.",
+  "metrics": {
+    "retrieval_time_ms": 2005,
+    "generation_time_ms": 0,
+    "total_latency_ms": 2005
   }
 }
 ```
 
 ---
 
-## 7. Lộ trình Nâng cấp Hệ thống (Evolutionary Roadmap)
+## 7. Bảo mật, Quản trị Chi phí & Chính sách Phục hồi (Security, Cost Governance & Resilience Policies)
+
+### 7.1. Danh mục Mã Lỗi Chuẩn hóa Toàn hệ thống (Standardized Error Catalog)
+
+| Mã Lỗi (`error_code`) | Phân loại | Mô tả nguyên nhân | Hành động của Hệ thống |
+| :--- | :--- | :--- | :--- |
+| `ERR_MISSING_API_KEY` | Security | Thiếu `JINA_API_KEY` hoặc `OPENROUTER_API_KEY` | Fail-fast khi khởi tạo pipeline |
+| `ERR_WORKSPACE_NOT_FOUND` | Business | `workspace_id` không tồn tại trong hệ thống | Trả về lỗi, từ chối thực hiện |
+| `ERR_DUPLICATE_BOOK_TITLE` | Business | Trùng tên sách trong Workspace khi `overwrite=false` | Trả về lỗi kèm hướng dẫn bật cờ `overwrite` |
+| `ERR_DOCUMENT_TOO_LARGE` | Cost Guardrail | Số trang > 1000 hoặc số chunk > 3000 | Từ chối nạp để bảo vệ ngân sách chi phí |
+| `ERR_UNSUPPORTED_SCANNED_PDF` | Validation | PDF scan không có lớp văn bản hợp lệ | Từ chối nạp, yêu cầu Digital PDF |
+| `ERR_NO_CHUNKS_GENERATED` | Ingestion | File PDF rỗng hoặc không trích xuất được text | Trả về lỗi nạp dữ liệu |
+| `ERR_UPSTREAM_EMBEDDING_FAILED` | Resilience | Jina Embedding API lỗi/timeout sau khi hết retry | Trả về kết quả FAILED, bảo toàn trạng thái |
+| `ERR_VECTOR_STORAGE_FAILED` | Storage | Thao tác đọc/ghi vào ChromaDB bị lỗi | Trả về kết quả FAILED |
+| `ERR_UPSTREAM_GENERATION_FAILED` | Resilience | OpenRouter LLM API lỗi/timeout sau khi hết retry | Trả về PARTIAL kèm citations trích xuất |
+| `ERR_QUERY_TIMEOUT` | Resilience | Tổng thời gian query vượt quá budget 8.0s | Fail-fast ngắt luồng và trả về timeout error |
+
+### 7.2. Chính sách Phục hồi Hai Tầng (Dual-Profile Resilience Strategy)
+
+Hệ thống phân tách rạch ròi 2 chính sách Retry & Timeout tương ứng với 2 luồng vận hành có đặc tính khác nhau:
+
+1. **Patient Retry Profile (Dành cho Batch Ingestion - Phase 2)**:
+   * **Bản chất**: Luồng xử lý nền (Offline / Asynchronous), ưu tiên **tính bền bỉ và toàn vẹn dữ liệu** (Durability) hơn tốc độ tức thời.
+   * **Chính sách**:
+     * `timeout`: `45.0s` cho mỗi batch 32 chunks.
+     * `max_retries`: `4` lần thử.
+     * `wait_strategy`: `wait_exponential(multiplier=1, min=2, max=30)` kết hợp `wait_random` (Jitter) để tránh bão request khi phục hồi sau sự cố.
+     * `throttling`: `asyncio.Semaphore(4)` và `inter_batch_delay_sec = 0.05s`.
+
+2. **Agile Fast-Fail Profile (Dành cho Interactive Query - Phase 3)**:
+   * **Bản chất**: Luồng tương tác trực tiếp với người dùng (Online / Realtime), ưu tiên **độ trễ thấp và phản hồi nhanh** (Low Latency / Bounded Latency).
+   * **Chính sách**:
+     * `query_embedding_timeout`: `2.0s`.
+     * `query_generation_timeout`: `5.0s`.
+     * `max_retries`: Tối đa `2` lần thử (1 request ban đầu + 1 fast-retry nếu gặp transient network error).
+     * `wait_strategy`: `wait_fixed(0.5s)`.
+     * `total_timeout_budget`: `8.0s` hard deadline.
+     * `fallback`: Bật chế độ `PARTIAL` grounding trả về trích dẫn nếu LLM generation gặp sự cố.
+
+---
+
+## 8. Lộ trình Nâng cấp Hệ thống (Evolutionary Roadmap)
 
 1. **Vòng lặp 1 (Hiện tại - Baseline MVP)**:
    - Quản lý môi trường nhanh gọn với `uv`.
-   - Cửa sổ trượt cố định (Flat-Window Chunking).
-   - Truy xuất Vector đơn thuần (Jina Dense Retrieval) + Phân vùng Workspace.
-   - Sinh phản hồi với DeepSeek v4 Flash.
+   - Cửa sổ trượt cố định (Flat-Window Chunking) + Lọc cô lập theo Workspace.
+   - Dual-Profile Resilience + Chuẩn hóa SLA P95/P99.
+   - Deduplication Policy với cờ `overwrite` & Cost Guardrails.
+   - Trả lời trích dẫn với DeepSeek v4 Flash và Jina v5 Omni Small.
 2. **Vòng lặp 2 (Nâng cấp Cấu trúc & Ngữ nghĩa - Semantic Chunking & Metadata Persistence)**:
    - Lưu trữ bền vững Metadata Workspace/Book qua SQLite/RDBMS để loại trừ rủi ro dữ liệu mồ côi khi restart service.
    - Trích xuất Mục lục (TOC Extraction) & Phân tích cấu trúc phân cấp Chương/Mục.
-   - Phân mảnh theo ranh giới ngữ nghĩa của sách.
+   - Phân đoạn ngữ nghĩa (Semantic Chunking) theo ranh giới đoạn văn và đề mục sách.
 3. **Vòng lặp 3 (Nâng cấp Tìm kiếm Lai & Tái xếp hạng - Hybrid Search & Reranking)**:
    - Bổ sung chỉ mục từ khóa (BM25 Sparse Index) song song với Jina Dense Vector.
-   - Tích hợp mô hình Reranker để nâng cao Recall@5 lên $\ge 85\%$.
+   - Tích hợp mô hình Reranker (Jina Reranker v2) để nâng cao Recall@5 lên $\ge 85\%$.
 4. **Vòng lặp 4 (Truy vấn Tổng hợp Toàn cục - Global Synthesis)**:
    - Hỗ trợ câu hỏi tổng quát toàn bộ cuốn sách hoặc so sánh chéo nhiều sách trong Workspace (Hierarchical Summarization / Map-Reduce RAG).

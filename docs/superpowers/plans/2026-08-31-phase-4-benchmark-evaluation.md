@@ -288,6 +288,7 @@ Expected: FAIL with `ModuleNotFoundError`
 
 ```python
 # src/exocort/evaluation/benchmark.py
+import statistics
 from typing import List, Optional, Callable, Awaitable
 from pydantic import BaseModel
 from exocort.pipeline import EBookRAGPipeline
@@ -299,6 +300,9 @@ class BenchmarkReport(BaseModel):
     recall_at_k: float
     faithfulness_rate: float
     avg_latency_ms: float
+    p95_latency_ms: float = 0.0
+    p99_latency_ms: float = 0.0
+    total_tokens_consumed: int = 0
     passed_threshold: bool
 
 class BenchmarkRunner:
@@ -319,16 +323,19 @@ class BenchmarkRunner:
             return BenchmarkReport(
                 total_test_cases=0, recall_at_k=0.0,
                 faithfulness_rate=0.0, avg_latency_ms=0.0,
+                p95_latency_ms=0.0, p99_latency_ms=0.0,
                 passed_threshold=False,
             )
 
         correct_retrievals = 0
         total_faithfulness = 0.0
-        total_latency = 0.0
+        latencies: List[float] = []
+        total_tokens = 0
 
         for tc in test_cases:
             res = await self.pipeline.query_workspace(workspace_id, tc.query)
-            total_latency += res.total_latency_ms
+            latencies.append(res.total_latency_ms)
+            total_tokens += res.total_tokens
 
             # Recall@K
             if recall_at_k(res.citations, tc.expected_page):
@@ -350,14 +357,23 @@ class BenchmarkRunner:
         n = len(test_cases)
         recall = correct_retrievals / n
         faithfulness = total_faithfulness / n
-        avg_lat = total_latency / n
-        passed = (recall >= 0.70) and (faithfulness >= 0.85)
+        avg_lat = sum(latencies) / n
+        sorted_latencies = sorted(latencies)
+        p95_idx = min(int(n * 0.95), n - 1)
+        p99_idx = min(int(n * 0.99), n - 1)
+        p95_lat = sorted_latencies[p95_idx]
+        p99_lat = sorted_latencies[p99_idx]
+
+        passed = (recall >= 0.70) and (faithfulness >= 0.85) and (p95_lat <= 2500.0)
 
         return BenchmarkReport(
             total_test_cases=n,
             recall_at_k=round(recall, 4),
             faithfulness_rate=round(faithfulness, 4),
             avg_latency_ms=round(avg_lat, 2),
+            p95_latency_ms=round(p95_lat, 2),
+            p99_latency_ms=round(p99_lat, 2),
+            total_tokens_consumed=total_tokens,
             passed_threshold=passed,
         )
 ```

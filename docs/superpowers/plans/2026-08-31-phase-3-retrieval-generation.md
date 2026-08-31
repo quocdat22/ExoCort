@@ -21,7 +21,7 @@
 
 ---
 
-### Task 1: DeepSeek Generation Client & Citation Formatter
+### Task 1: DeepSeek Generation Client & Citation Formatter with Fast Agile Resilience
 
 **Files:**
 - Create: `src/exocort/generation/deepseek_client.py`
@@ -37,6 +37,7 @@
 # tests/generation/test_deepseek_generation.py
 import pytest
 from unittest.mock import AsyncMock, patch
+from pydantic import SecretStr
 from exocort.generation.deepseek_client import DeepSeekGenerator
 from exocort.core.models import Chunk
 from exocort.core.config import RAGConfig
@@ -74,7 +75,7 @@ def test_prompt_context_assembly():
 
 @pytest.mark.asyncio
 async def test_deepseek_generate_response_mock():
-    config = RAGConfig(openrouter_api_key="mock_key")
+    config = RAGConfig(openrouter_api_key=SecretStr("mock_key"), query_generation_timeout=5.0)
     generator = DeepSeekGenerator(config)
 
     mock_resp_payload = {
@@ -82,7 +83,12 @@ async def test_deepseek_generate_response_mock():
             "message": {
                 "content": "Variable names should be descriptive and reveal intent."
             }
-        }]
+        }],
+        "usage": {
+            "prompt_tokens": 150,
+            "completion_tokens": 25,
+            "total_tokens": 175
+        }
     }
 
     chunks_with_scores = [
@@ -102,13 +108,14 @@ async def test_deepseek_generate_response_mock():
             raise_for_status=lambda: None
         )
 
-        answer, citations = await generator.generate_response("How to name?", chunks_with_scores)
+        answer, citations, tokens = await generator.generate_response("How to name?", chunks_with_scores)
         assert "Variable names should be descriptive" in answer
         assert len(citations) == 1
         assert citations[0].book_title == "Clean Code"
         assert citations[0].page_start == 45
         assert citations[0].page_end == 45
         assert citations[0].text_content == "Names should reveal intent."
+        assert tokens["total_tokens"] == 175
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -120,18 +127,25 @@ Expected: FAIL with `ModuleNotFoundError`
 
 ```python
 # src/exocort/generation/deepseek_client.py
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_fixed
 from exocort.core.models import Chunk, Citation
 from exocort.core.config import RAGConfig
 
 class DeepSeekGenerator:
+    """Generation client using DeepSeek v4 Flash via OpenRouter with Fast Agile Resilience."""
+
     def __init__(self, config: RAGConfig):
+        self.config = config
         self.model = config.llm_model
         self.temperature = config.llm_temperature
         self.max_tokens = config.llm_max_tokens
-        self.api_key = config.openrouter_api_key
+        self.api_key = (
+            config.openrouter_api_key.get_secret_value()
+            if hasattr(config.openrouter_api_key, "get_secret_value")
+            else str(config.openrouter_api_key)
+        )
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
 
     def build_augmented_prompt(
@@ -160,14 +174,25 @@ class DeepSeekGenerator:
         )
         return prompt
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=30))
+    @retry(stop=stop_after_attempt(2), wait=wait_fixed(0.5))
     async def generate_response(
         self,
         query: str,
         retrieved_chunks: List[Tuple[Chunk, float]]
-    ) -> Tuple[str, List[Citation]]:
+    ) -> Tuple[str, List[Citation], Dict[str, int]]:
+        citations: List[Citation] = [
+            Citation(
+                book_title=chunk.book_title,
+                page_start=chunk.page_start,
+                page_end=chunk.page_end,
+                relevance_score=round(score, 4),
+                text_content=chunk.text_content,
+            )
+            for chunk, score in retrieved_chunks
+        ]
+
         if not retrieved_chunks:
-            return "No relevant context found in this workspace.", []
+            return "No relevant context found in this workspace.", [], {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         prompt = self.build_augmented_prompt(query, retrieved_chunks)
         headers = {
@@ -181,24 +206,19 @@ class DeepSeekGenerator:
             "max_tokens": self.max_tokens
         }
 
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(timeout=self.config.query_generation_timeout) as client:
             resp = await client.post(self.api_url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
             answer = data["choices"][0]["message"]["content"].strip()
+            usage = data.get("usage", {})
+            tokens = {
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            }
 
-        citations: List[Citation] = [
-            Citation(
-                book_title=chunk.book_title,
-                page_start=chunk.page_start,
-                page_end=chunk.page_end,
-                relevance_score=round(score, 4),
-                text_content=chunk.text_content,
-            )
-            for chunk, score in retrieved_chunks
-        ]
-
-        return answer, citations
+        return answer, citations, tokens
 ```
 
 - [ ] **Step 4: Run test using uv to verify it passes**
@@ -210,12 +230,12 @@ Expected: PASS
 
 ```bash
 git add src/exocort/generation/ tests/generation/
-git commit -m "feat(phase-3): add DeepSeek generator and citation formatter for exocort"
+git commit -m "feat(phase-3): add DeepSeek generator with fast agile resilience and token telemetry"
 ```
 
 ---
 
-### Task 2: End-to-End EBookRAGPipeline Orchestrator
+### Task 2: End-to-End EBookRAGPipeline Orchestrator with Resilience & Deduplication
 
 **Files:**
 - Create: `src/exocort/pipeline.py`
@@ -234,7 +254,7 @@ import tempfile
 from unittest.mock import AsyncMock, patch
 from exocort.pipeline import EBookRAGPipeline
 from exocort.core.config import RAGConfig
-from exocort.core.models import IngestionStatus
+from exocort.core.models import IngestionStatus, QueryStatus
 
 @pytest.mark.asyncio
 async def test_pipeline_ingest_and_query_flow():
@@ -248,13 +268,14 @@ async def test_pipeline_ingest_and_query_flow():
         # 2. Mock Embedding & Generation
         mock_embeddings = [[0.1] * 1024]
         pipeline.embedding_client.embed_texts = AsyncMock(return_value=mock_embeddings)
+        pipeline.embedding_client.embed_query = AsyncMock(return_value=[0.1] * 1024)
         pipeline.generator.generate_response = AsyncMock(
-            return_value=("Continuous Integration is the practice of...", [])
+            return_value=("Continuous Integration is automated.", [], {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
         )
 
         # 3. Ingestion
         with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[
-            (1, "Continuous Integration is the practice of automating the integration of code changes.")
+            (1, "Continuous Integration is automated.")
         ]):
             ingest_res = await pipeline.ingest_book(
                 pdf_bytes=b"%PDF-1.4 mock",
@@ -265,14 +286,45 @@ async def test_pipeline_ingest_and_query_flow():
             assert ingest_res.total_pages == 1
             assert ingest_res.total_chunks_indexed == 1
 
-        # 4. Scoped Query
+        # 4. Deduplication Check (overwrite=False)
+        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "text")]):
+            dup_res = await pipeline.ingest_book(
+                pdf_bytes=b"%PDF-1.4 mock",
+                workspace_id=ws.workspace_id,
+                book_title="CI/CD Handbook",
+                overwrite=False
+            )
+            assert dup_res.status == IngestionStatus.REJECTED
+            assert dup_res.error_code == "ERR_DUPLICATE_BOOK_TITLE"
+
+        # 5. Scoped Query
         query_res = await pipeline.query_workspace(
             workspace_id=ws.workspace_id,
             query_text="What is Continuous Integration?"
         )
+        assert query_res.status == QueryStatus.SUCCESS
         assert "Continuous Integration" in query_res.answer
         assert query_res.workspace_id == ws.workspace_id
         assert query_res.total_latency_ms > 0
+
+@pytest.mark.asyncio
+async def test_pipeline_generation_failure_partial_fallback():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = RAGConfig(chroma_persist_dir=tmpdir)
+        pipeline = EBookRAGPipeline(config)
+        ws = pipeline.workspace_mgr.create_workspace(name="AI")
+
+        # Mock embedding succeed, generation fail
+        pipeline.embedding_client.embed_query = AsyncMock(return_value=[0.1] * 1024)
+        pipeline.generator.generate_response = AsyncMock(side_effect=RuntimeError("OpenRouter 503"))
+
+        query_res = await pipeline.query_workspace(
+            workspace_id=ws.workspace_id,
+            query_text="Explain RAG"
+        )
+        assert query_res.status == QueryStatus.PARTIAL
+        assert query_res.error_code == "ERR_UPSTREAM_GENERATION_FAILED"
+        assert "tạm thời gián đoạn" in query_res.answer
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -289,9 +341,12 @@ import uuid
 from typing import List, Optional
 from exocort.core.config import RAGConfig
 from exocort.core.models import (
+    BookMetadata,
+    Citation,
     IngestionResult,
     IngestionStatus,
     QueryResult,
+    QueryStatus,
 )
 from exocort.workspace.manager import WorkspaceManager
 from exocort.ingestion.validator import PDFValidator
@@ -302,6 +357,8 @@ from exocort.storage.vector_store import ScopedVectorStore
 from exocort.generation.deepseek_client import DeepSeekGenerator
 
 class EBookRAGPipeline:
+    """Unified Orchestrator for E-Book RAG Engine Baseline MVP."""
+
     def __init__(self, config: Optional[RAGConfig] = None):
         self.config = config or RAGConfig()
         self.workspace_mgr = WorkspaceManager()
@@ -315,11 +372,12 @@ class EBookRAGPipeline:
         self,
         pdf_bytes: bytes,
         workspace_id: str,
-        book_title: str
+        book_title: str,
+        overwrite: bool = False
     ) -> IngestionResult:
         start_time = time.time()
         
-        # Verify workspace existence
+        # 1. Verify workspace existence
         if not self.workspace_mgr.get_workspace(workspace_id):
             return IngestionResult(
                 status=IngestionStatus.FAILED,
@@ -327,28 +385,45 @@ class EBookRAGPipeline:
                 message=f"Workspace {workspace_id} does not exist."
             )
 
-        # 1. Extract pages
+        # 2. Deduplication Check
+        existing_book = self.workspace_mgr.get_book_by_title(workspace_id, book_title)
+        if existing_book and not overwrite:
+            return IngestionResult(
+                status=IngestionStatus.REJECTED,
+                error_code="ERR_DUPLICATE_BOOK_TITLE",
+                message=f"Book with title '{book_title}' already exists in workspace '{workspace_id}'. Set overwrite=true to replace."
+            )
+
+        # 3. Extract pages
         try:
             pages = PDFExtractor.extract_pages(pdf_bytes)
         except Exception as e:
             return IngestionResult(
                 status=IngestionStatus.FAILED,
                 error_code="ERR_PDF_EXTRACTION_FAILED",
-                message=str(e)
+                message=f"Failed to extract PDF: {str(e)}"
             )
 
-        # 2. Validate text layer (Block Scanned PDF)
-        pages_text = [p[1] for p in pages]
-        is_valid, error_code = self.validator.validate_text_layer(pages_text)
-        if not is_valid:
+        # 4. Guardrails & Validation Gate
+        is_valid_count, count_error = self.validator.validate_page_count(len(pages))
+        if not is_valid_count:
             return IngestionResult(
                 status=IngestionStatus.REJECTED,
-                error_code=error_code,
+                error_code=count_error,
+                message=f"Document contains {len(pages)} pages, exceeding maximum limit of {self.config.max_pages_per_book}."
+            )
+
+        pages_text = [p[1] for p in pages]
+        is_valid_text, text_error = self.validator.validate_text_layer(pages_text)
+        if not is_valid_text:
+            return IngestionResult(
+                status=IngestionStatus.REJECTED,
+                error_code=text_error,
                 message="Scanned PDF format without valid text layer is not supported in MVP baseline."
             )
 
-        # 3. Flat-Window Chunking
-        book_id = f"bk_{uuid.uuid4().hex[:8]}"
+        # 5. Flat-Window Chunking
+        book_id = existing_book.book_id if (existing_book and overwrite) else f"bk_{uuid.uuid4().hex[:8]}"
         chunks = self.chunker.chunk_pages(
             pages=pages,
             workspace_id=workspace_id,
@@ -360,24 +435,69 @@ class EBookRAGPipeline:
             return IngestionResult(
                 status=IngestionStatus.FAILED,
                 error_code="ERR_NO_CHUNKS_GENERATED",
-                message="No chunks could be extracted."
+                message="No valid chunks could be extracted from the document."
             )
 
-        # 4. Embed Chunks
-        chunk_texts = [c.text_content for c in chunks]
-        vectors = await self.embedding_client.embed_texts(chunk_texts)
+        if len(chunks) > self.config.max_chunks_per_book:
+            return IngestionResult(
+                status=IngestionStatus.REJECTED,
+                error_code="ERR_DOCUMENT_TOO_LARGE",
+                message=f"Chunk count {len(chunks)} exceeds maximum limit of {self.config.max_chunks_per_book}."
+            )
 
-        # 5. Index into Scoped Vector Store
-        self.vector_store.add_chunks(chunks, vectors)
-        self.workspace_mgr.assign_book(workspace_id, book_id)
+        # 6. Atomic Cleanup if Overwriting
+        if existing_book and overwrite:
+            try:
+                self.vector_store.delete_by_book(existing_book.book_id)
+                self.workspace_mgr.remove_book(workspace_id, existing_book.book_id)
+            except Exception as e:
+                return IngestionResult(
+                    status=IngestionStatus.FAILED,
+                    error_code="ERR_VECTOR_STORAGE_FAILED",
+                    message=f"Failed to clear old records during overwrite: {str(e)}"
+                )
+
+        # 7. Embed Chunks (Patient Retry Profile)
+        chunk_texts = [c.text_content for c in chunks]
+        try:
+            vectors = await self.embedding_client.embed_texts(chunk_texts)
+        except Exception as e:
+            return IngestionResult(
+                status=IngestionStatus.FAILED,
+                error_code="ERR_UPSTREAM_EMBEDDING_FAILED",
+                message=f"Failed to embed chunks after retry: {str(e)}"
+            )
+
+        # 8. Index into Scoped Vector Store
+        try:
+            self.vector_store.add_chunks(chunks, vectors)
+        except Exception as e:
+            return IngestionResult(
+                status=IngestionStatus.FAILED,
+                error_code="ERR_VECTOR_STORAGE_FAILED",
+                message=f"Failed to persist vector records: {str(e)}"
+            )
+
+        # 9. Register Book Metadata
+        book_meta = BookMetadata(
+            book_id=book_id,
+            workspace_id=workspace_id,
+            title=book_title,
+            total_pages=len(pages),
+            total_chunks=len(chunks)
+        )
+        self.workspace_mgr.assign_book(workspace_id, book_meta)
 
         duration = time.time() - start_time
+        total_tokens_est = sum(c.token_count for c in chunks)
+
         return IngestionResult(
             status=IngestionStatus.COMPLETED,
             book_id=book_id,
             book_title=book_title,
             total_pages=len(pages),
             total_chunks_indexed=len(chunks),
+            estimated_total_tokens=total_tokens_est,
             processing_time_sec=round(duration, 2)
         )
 
@@ -390,37 +510,113 @@ class EBookRAGPipeline:
         start_time = time.time()
         k = top_k or self.config.top_k
 
-        # 1. Embed query
-        retrieval_start = time.time()
-        query_embeddings = await self.embedding_client.embed_texts([query_text])
-        query_vec = query_embeddings[0] if query_embeddings else [0.0] * self.config.embedding_dimension
+        # 1. Validate Workspace
+        if not self.workspace_mgr.get_workspace(workspace_id):
+            return QueryResult(
+                query=query_text,
+                workspace_id=workspace_id,
+                status=QueryStatus.FAILED,
+                error_code="ERR_WORKSPACE_NOT_FOUND",
+                error_message=f"Workspace '{workspace_id}' does not exist."
+            )
 
-        # 2. Scoped Retrieval
-        retrieved_chunks = self.vector_store.search_scoped(
-            workspace_id=workspace_id,
-            query_vector=query_vec,
-            top_k=k
-        )
+        # 2. Fast Query Embedding
+        retrieval_start = time.time()
+        try:
+            query_vec = await self.embedding_client.embed_query(query_text)
+        except Exception as e:
+            return QueryResult(
+                query=query_text,
+                workspace_id=workspace_id,
+                status=QueryStatus.FAILED,
+                error_code="ERR_UPSTREAM_EMBEDDING_FAILED",
+                error_message=f"Failed to embed query text: {str(e)}",
+                total_latency_ms=round((time.time() - start_time) * 1000, 2)
+            )
+
+        # 3. Scoped Dense Retrieval
+        try:
+            retrieved_chunks = self.vector_store.search_scoped(
+                workspace_id=workspace_id,
+                query_vector=query_vec,
+                top_k=k
+            )
+        except Exception as e:
+            return QueryResult(
+                query=query_text,
+                workspace_id=workspace_id,
+                status=QueryStatus.FAILED,
+                error_code="ERR_VECTOR_STORAGE_FAILED",
+                error_message=f"Vector store search failed: {str(e)}",
+                total_latency_ms=round((time.time() - start_time) * 1000, 2)
+            )
+
         retrieval_time_ms = (time.time() - retrieval_start) * 1000
 
-        # 3. Generation
-        gen_start = time.time()
-        answer, citations = await self.generator.generate_response(
-            query=query_text,
-            retrieved_chunks=retrieved_chunks
-        )
-        gen_time_ms = (time.time() - gen_start) * 1000
+        # Empty context handling
+        if not retrieved_chunks:
+            return QueryResult(
+                query=query_text,
+                workspace_id=workspace_id,
+                status=QueryStatus.SUCCESS,
+                answer="No relevant context found in this workspace.",
+                citations=[],
+                retrieval_time_ms=round(retrieval_time_ms, 2),
+                generation_time_ms=0.0,
+                total_latency_ms=round((time.time() - start_time) * 1000, 2)
+            )
 
-        total_latency_ms = (time.time() - start_time) * 1000
-        return QueryResult(
-            query=query_text,
-            workspace_id=workspace_id,
-            answer=answer,
-            citations=citations,
-            retrieval_time_ms=round(retrieval_time_ms, 2),
-            generation_time_ms=round(gen_time_ms, 2),
-            total_latency_ms=round(total_latency_ms, 2)
-        )
+        # 4. Generation with Graceful Degradation
+        gen_start = time.time()
+        try:
+            answer, citations, tokens = await self.generator.generate_response(
+                query=query_text,
+                retrieved_chunks=retrieved_chunks
+            )
+            gen_time_ms = (time.time() - gen_start) * 1000
+            total_latency_ms = (time.time() - start_time) * 1000
+
+            return QueryResult(
+                query=query_text,
+                workspace_id=workspace_id,
+                status=QueryStatus.SUCCESS,
+                answer=answer,
+                citations=citations,
+                retrieval_time_ms=round(retrieval_time_ms, 2),
+                generation_time_ms=round(gen_time_ms, 2),
+                total_latency_ms=round(total_latency_ms, 2),
+                prompt_tokens=tokens.get("prompt_tokens", 0),
+                completion_tokens=tokens.get("completion_tokens", 0),
+                total_tokens=tokens.get("total_tokens", 0)
+            )
+        except Exception as e:
+            gen_time_ms = (time.time() - gen_start) * 1000
+            total_latency_ms = (time.time() - start_time) * 1000
+
+            # Fallback: Partial grounding with retrieved citations
+            fallback_citations = [
+                Citation(
+                    book_title=c.book_title,
+                    page_start=c.page_start,
+                    page_end=c.page_end,
+                    relevance_score=round(score, 4),
+                    text_content=c.text_content
+                )
+                for c, score in retrieved_chunks
+            ]
+
+            return QueryResult(
+                query=query_text,
+                workspace_id=workspace_id,
+                status=QueryStatus.PARTIAL,
+                answer="Dịch vụ tổng hợp câu trả lời tạm thời gián đoạn. Dưới đây là các đoạn trích liên quan nhất được tìm thấy từ tài liệu của bạn.",
+                citations=fallback_citations,
+                error_code="ERR_UPSTREAM_GENERATION_FAILED",
+                error_message=f"LLM Generation service failed: {str(e)}",
+                retrieval_time_ms=round(retrieval_time_ms, 2),
+                generation_time_ms=round(gen_time_ms, 2),
+                total_latency_ms=round(total_latency_ms, 2)
+            )
 ```
 
 - [ ] **Step 4: Run test using uv to verify it passes**
@@ -432,5 +628,5 @@ Expected: PASS
 
 ```bash
 git add src/exocort/pipeline.py tests/test_e2e_pipeline.py
-git commit -m "feat(phase-3): add end-to-end EBookRAGPipeline orchestrator for exocort"
+git commit -m "feat(phase-3): add end-to-end EBookRAGPipeline with resilience, deduplication and graceful degradation"
 ```
