@@ -8,7 +8,7 @@
 
 **Tech Stack:** `uv`, Python 3.10+, `pydantic`, `pypdf`, `tiktoken`, `pytest`.
 
-**Spec:** `docs/superpowers/specs/2026-08-31-ebook-rag-baseline-hld.md`
+**Spec:** `docs/superpowers/specs/2026-08-31-exocort-baseline-hld.md`
 
 ## Global Constraints
 
