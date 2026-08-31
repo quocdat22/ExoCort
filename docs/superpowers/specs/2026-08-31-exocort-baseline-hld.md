@@ -120,15 +120,15 @@ Hệ thống được chia thành 4 Phase phát triển tuần tự. Đầu ra c
 ```mermaid
 flowchart TD
     subgraph Phase1["PHASE 1: Ingestion, Validation & Scoping"]
-        A[File PDF + Workspace ID + Book Title + Overwrite Flag] --> B[Validation: Page Cap & Scan Detection]
+        A[File PDF + Workspace ID + Book Title + Overwrite Flag] --> B[Fast Page Cap Validation Gate]
         B -- Hợp lệ --> C[Deduplication Check: overwrite flag]
         C --> D[Text Extraction & Cleaning]
-        D --> E[Flat-Window Chunking + Metadata Tagging]
+        D --> E[Scan Detection & Flat-Window Chunking + Metadata Tagging]
     end
 
     subgraph Phase2["PHASE 2: Batch Embedding & Vector Storage"]
         E -->|Output: Normalized Chunks Collection| F[Batch Grouping: 32 chunks]
-        F --> G[Patient Batch Embedding: Jina v5 with Semaphore & Backoff]
+        F --> G[Concurrent Patient Batch Embedding: asyncio.gather with Semaphore 4 & Backoff]
         G --> H[Vector DB Indexing với Scoped Filter]
     end
 
@@ -161,9 +161,9 @@ flowchart TD
   2. *Deduplication Gate*: Kiểm tra xem sách cùng `book_title` đã tồn tại trong Workspace chưa.
      - Nếu đã tồn tại và `overwrite == false`: Lập tức từ chối với mã lỗi `ERR_DUPLICATE_BOOK_TITLE`.
      - Nếu đã tồn tại và `overwrite == true`: Cho phép tiếp tục luồng nạp theo quy trình Staged Atomic Replacement (tạo `new_book_id` riêng biệt, nhúng và lập chỉ mục bản mới trước, chỉ dọn dẹp `old_book_id` sau khi bản mới thành công 100%).
-  3. *Page Cap Validation Gate*: Đếm số trang PDF. Nếu vượt quá `max_pages_per_book` (1,000 trang), từ chối với mã lỗi `ERR_DOCUMENT_TOO_LARGE`.
-  4. *Scan Detection Gate*: Đo mật độ ký tự văn bản có nghĩa trên mỗi trang. Nếu tỷ lệ trang hợp lệ (≥ 50 ký tự/trang) thấp hơn 50% tổng số trang, lập tức từ chối với mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
-  5. *Text Extraction*: Trích xuất toàn bộ văn bản theo từng trang, lưu giữ ranh giới trang (character offset).
+  3. *Page Cap Validation Gate (Fail-Fast)*: Đếm nhanh số trang PDF qua cấu trúc tài liệu (`len(reader.pages)`) trước khi giải mã nội dung. Nếu vượt quá `max_pages_per_book` (1,000 trang), lập tức từ chối với mã lỗi `ERR_DOCUMENT_TOO_LARGE` mà không trích xuất text, tiết kiệm tối đa CPU/RAM và chi phí.
+  4. *Text Extraction*: Trích xuất toàn bộ văn bản theo từng trang cho tài liệu hợp lệ trong hạn mức, lưu giữ ranh giới trang (character offset).
+  5. *Scan Detection Gate*: Đo mật độ ký tự văn bản có nghĩa trên mỗi trang. Nếu tỷ lệ trang hợp lệ (≥ 50 ký tự/trang) thấp hơn 50% tổng số trang, lập tức từ chối với mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
   6. *Cross-page Flat-Window Chunking*: Nối toàn bộ văn bản các trang thành chuỗi liên tục, phân đoạn bằng cửa sổ trượt token-based (`tiktoken`, encoding `cl100k_base`), ánh xạ ngược vị trí trang qua character offset:
      - Kích thước khối (Chunk Size): `512 tokens`.
      - Độ gối đầu (Chunk Overlap): `50 tokens` (~10%).
@@ -171,8 +171,8 @@ flowchart TD
   7. *Metadata Binding*: Đóng gói mỗi chunk thành một thực thể có cấu trúc kèm thông tin định danh (`book_title`, `workspace_id`, `page_start`, `page_end`, `chunk_index`).
 * **Đầu ra (Output)**: **Normalized Chunks Collection** (Tập hợp các chunk chuẩn hóa kèm metadata).
 * **Tiêu chí Hoàn thành (DoD)**:
+  - 100% file vượt quá 1,000 trang bị từ chối ngay lập tức với mã lỗi `ERR_DOCUMENT_TOO_LARGE` trước khi extract text.
   - 100% file PDF scan bị từ chối với mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
-  - 100% file vượt quá 1,000 trang bị từ chối với mã lỗi `ERR_DOCUMENT_TOO_LARGE`.
   - Sách trùng tên bị chặn khi `overwrite=false` và được xử lý thay thế sạch sẽ khi `overwrite=true` không gây mất dữ liệu nếu nạp thất bại.
   - 100% chunk được gán đúng `workspace_id`, `book_title`, `page_start`, `page_end`.
 
@@ -180,12 +180,12 @@ flowchart TD
 
 ### 4.2. PHASE 2: Số hóa Vector & Lưu trữ Chỉ mục (Batch Embedding & Vector Storage)
 
-* **Mục tiêu**: Chuyển đổi các khối văn bản thành vector ngữ nghĩa thông qua Jina AI với cơ chế điều tiết lưu lượng (Throttling) và lưu trữ có phân vùng theo Workspace vào ChromaDB.
+* **Mục tiêu**: Chuyển đổi các khối văn bản thành vector ngữ nghĩa thông qua Jina AI với cơ chế điều tiết lưu lượng (Throttling) thực sự song song qua Semaphore và lưu trữ có phân vùng theo Workspace vào ChromaDB.
 * **Đầu vào (Input)**:
   - Normalized Chunks Collection từ **Phase 1**.
   - `old_book_id` (nếu đang thực hiện ghi đè sách).
 * **Xử lý Chức năng (Functional Processing)**:
-  1. *Batch Grouping & Throttling*: Gom nhóm các chunk thành từng lô (Batch Size = 32 chunks). Áp dụng `asyncio.Semaphore(max_concurrency=4)` và giãn cách `inter_batch_delay_sec = 0.05s` để tránh chạm trần Rate Limit (RPM/TPM) của Jina AI.
+  1. *Batch Grouping & Concurrent Throttling*: Gom nhóm các chunk thành từng lô (Batch Size = 32 chunks). Thực thi nhúng đồng thời bằng `asyncio.gather()` có điều tiết bởi `asyncio.Semaphore(max_concurrency=4)` và giãn cách `inter_batch_delay_sec = 0.05s` để vừa tối đa hóa thông lượng đạt DoD $\ge$ 50 trang/phút vừa tránh chạm trần Rate Limit (RPM/TPM) của Jina AI.
   2. *Resilient Batch Embedding (Patient Retry Profile)*:
      - Gửi văn bản tới mô hình `jina-embeddings-v5-omni-small`.
      - Cấu hình Retry: Tối đa 4 lần thử, Exponential backoff ($min=2s, max=30s$), `httpx` timeout = $45.0s$.
@@ -196,7 +196,7 @@ flowchart TD
 * **Đầu ra (Output)**: **Scoped Vector Index** & **IngestionResult**.
 * **Tiêu chí Hoàn thành (DoD)**:
   - Tỷ lệ hoàn thành nhúng vector đạt 100% trên các chunk hợp lệ.
-  - Tốc độ lập chỉ mục đạt tối thiểu $\ge$ 50 trang PDF/phút.
+  - Tốc độ lập chỉ mục đạt tối thiểu $\ge$ 50 trang PDF/phút nhờ xử lý song song với Semaphore.
   - Không làm sập ứng dụng khi Jina API gặp lỗi (trả về `IngestionResult` lỗi rõ ràng và giữ nguyên trạng dữ liệu cũ).
 
 ---
@@ -467,12 +467,12 @@ QueryWorkspace(
 Hệ thống phân tách rạch ròi 2 chính sách Retry & Timeout tương ứng với 2 luồng vận hành có đặc tính khác nhau:
 
 1. **Patient Retry Profile (Dành cho Batch Ingestion - Phase 2)**:
-   * **Bản chất**: Luồng xử lý nền (Offline / Asynchronous), ưu tiên **tính bền bỉ và toàn vẹn dữ liệu** (Durability) hơn tốc độ tức thời.
+   * **Bản chất**: Luồng xử lý nền (Offline / Asynchronous), ưu tiên **tính bền bỉ và toàn vẹn dữ liệu** (Durability) kết hợp **thông lượng cao** ($\ge 50$ trang/phút).
    * **Chính sách**:
      * `timeout`: `45.0s` cho mỗi batch 32 chunks.
-     * `max_retries`: `4` lần thử.
+     * `max_retries`: `4` lần thử cho mỗi batch.
      * `wait_strategy`: `wait_exponential(multiplier=1, min=2, max=30)` kết hợp `wait_random` (Jitter) để tránh bão request khi phục hồi sau sự cố.
-     * `throttling`: `asyncio.Semaphore(4)` và `inter_batch_delay_sec = 0.05s`.
+     * `throttling & concurrency`: Chạy đồng thời qua `asyncio.gather(*[...])` điều tiết bởi `asyncio.Semaphore(max_concurrency=4)` và `inter_batch_delay_sec = 0.05s`.
 
 2. **Agile Fast-Fail Profile (Dành cho Interactive Query - Phase 3)**:
    * **Bản chất**: Luồng tương tác trực tiếp với người dùng (Online / Realtime), ưu tiên **độ trễ thấp và phản hồi nhanh** (Low Latency / Bounded Latency).
@@ -481,7 +481,7 @@ Hệ thống phân tách rạch ròi 2 chính sách Retry & Timeout tương ứn
      * `query_generation_timeout`: `5.0s`.
      * `max_retries`: Tối đa `2` lần thử (1 request ban đầu + 1 fast-retry nếu gặp transient network error).
      * `wait_strategy`: `wait_fixed(0.5s)`.
-     * `total_timeout_budget`: `8.0s` hard deadline.
+     * `total_timeout_budget`: `8.0s` hard deadline được enforce bằng `asyncio.wait_for()` bọc toàn bộ `query_workspace()`, ngắt lập tức và trả về `ERR_QUERY_TIMEOUT` nếu vượt ngưỡng (bảo vệ cam kết SLA P99 $\le 8.0s$).
      * `fallback`: Bật chế độ `PARTIAL` grounding trả về trích dẫn nếu LLM generation gặp sự cố.
 
 ---

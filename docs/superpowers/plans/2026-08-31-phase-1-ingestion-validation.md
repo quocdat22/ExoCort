@@ -475,10 +475,25 @@ git commit -m "feat(phase-1): add workspace manager with deduplication and book 
 
 ```python
 # tests/ingestion/test_ingestion_pipeline.py
+import io
 import pytest
+import pypdf
+from exocort.ingestion.extractor import PDFExtractor
 from exocort.ingestion.validator import PDFValidator
 from exocort.ingestion.chunker import FlatWindowChunker
 from exocort.core.config import RAGConfig
+
+def test_pdf_extractor_get_page_count():
+    # Create a minimal 2-page in-memory PDF
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.add_blank_page(width=100, height=100)
+    buf = io.BytesIO()
+    writer.write(buf)
+    pdf_bytes = buf.getvalue()
+
+    count = PDFExtractor.get_page_count(pdf_bytes)
+    assert count == 2
 
 def test_validator_rejects_empty_or_scanned_pdf():
     config = RAGConfig(min_text_density_per_page=50)
@@ -553,6 +568,12 @@ from typing import List, Tuple
 import pypdf
 
 class PDFExtractor:
+    @staticmethod
+    def get_page_count(pdf_bytes: bytes) -> int:
+        """Fast page count extraction directly from PDF catalog without decoding page contents."""
+        reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+        return len(reader.pages)
+
     @staticmethod
     def extract_pages(pdf_bytes: bytes) -> List[Tuple[int, str]]:
         reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
@@ -688,5 +709,25 @@ Expected: PASS
 
 ```bash
 git add src/exocort/ingestion/ tests/ingestion/
-git commit -m "feat(phase-1): add PDF extractor, guardrail validator and flat-window chunker"
+git commit -m "feat(phase-1): add PDF extractor with fast page count, guardrail validator and flat-window chunker"
 ```
+
+---
+
+## Test Strategy
+
+| Task | Component | Test Type | Goal |
+|---|---|---|---|
+| Task 0 | Environment Setup | CLI / Smoke | Verify `uv` manages dependencies and pytest executes cleanly. |
+| Task 1 | Core Models & Config | Unit Test | Verify Pydantic schema validation, SecretStr protection, and fail-fast API key check. |
+| Task 2 | Workspace Manager | Unit Test | Verify in-memory CRUD, book assignment, case-insensitive title deduplication, and removal. |
+| Task 3 | Ingestion Pipeline | Unit Test | Verify fast page count checking (`get_page_count`), oversized document rejection, scanned PDF detection, and cross-page chunk boundary calculation. |
+
+## Definition of Done (DoD)
+
+- [ ] 100% unit tests pass with `uv run pytest`.
+- [ ] Fail-fast API key validation raises `ValueError("ERR_MISSING_API_KEY")` when keys are missing.
+- [ ] Fast page count check (`PDFExtractor.get_page_count`) executes without decoding page text.
+- [ ] 100% of oversized PDFs (> 1,000 pages) are rejected with `ERR_DOCUMENT_TOO_LARGE`.
+- [ ] 100% of scanned PDFs (< 50% valid text pages) are rejected with `ERR_UNSUPPORTED_SCANNED_PDF`.
+- [ ] Cross-page flat-window chunking accurately preserves page ranges (`page_start`, `page_end`).

@@ -288,9 +288,10 @@ async def test_pipeline_ingest_and_query_flow():
         )
 
         # 3. Ingestion
-        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[
-            (1, "Continuous Integration is automated.")
-        ]):
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=1), \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[
+                 (1, "Continuous Integration is automated.")
+             ]):
             ingest_res = await pipeline.ingest_book(
                 pdf_bytes=b"%PDF-1.4 mock",
                 workspace_id=ws.workspace_id,
@@ -301,7 +302,8 @@ async def test_pipeline_ingest_and_query_flow():
             assert ingest_res.total_chunks_indexed == 1
 
         # 4. Deduplication Check (overwrite=False)
-        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "text")]):
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=1), \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "text")]):
             dup_res = await pipeline.ingest_book(
                 pdf_bytes=b"%PDF-1.4 mock",
                 workspace_id=ws.workspace_id,
@@ -320,6 +322,31 @@ async def test_pipeline_ingest_and_query_flow():
         assert "Continuous Integration" in query_res.answer
         assert query_res.workspace_id == ws.workspace_id
         assert query_res.total_latency_ms > 0
+
+@pytest.mark.asyncio
+async def test_pipeline_rejects_oversized_pdf_before_text_extraction():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = RAGConfig(
+            max_pages_per_book=10,
+            chroma_persist_dir=tmpdir,
+            jina_api_key=SecretStr("mock_jina_key"),
+            openrouter_api_key=SecretStr("mock_openrouter_key"),
+        )
+        pipeline = EBookRAGPipeline(config)
+        ws = pipeline.workspace_mgr.create_workspace(name="GuardrailWS")
+
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=1500) as mock_get_count, \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages") as mock_extract:
+            res = await pipeline.ingest_book(
+                pdf_bytes=b"%PDF-1.4 mock huge",
+                workspace_id=ws.workspace_id,
+                book_title="Huge Book",
+                overwrite=False
+            )
+            assert res.status == IngestionStatus.REJECTED
+            assert res.error_code == "ERR_DOCUMENT_TOO_LARGE"
+            mock_get_count.assert_called_once()
+            mock_extract.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_pipeline_generation_failure_partial_fallback():
@@ -384,7 +411,8 @@ async def test_pipeline_atomic_overwrite_failure_preserves_old_data():
 
         # 1. First ingest succeeds
         pipeline.embedding_client.embed_texts = AsyncMock(return_value=[[0.1] * 1024])
-        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "Original Version Content")]):
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=1), \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "Original Version Content")]):
             res1 = await pipeline.ingest_book(
                 pdf_bytes=b"%PDF-1.4 mock",
                 workspace_id=ws.workspace_id,
@@ -400,7 +428,8 @@ async def test_pipeline_atomic_overwrite_failure_preserves_old_data():
 
         # 2. Overwrite attempt FAILS during embedding
         pipeline.embedding_client.embed_texts = AsyncMock(side_effect=RuntimeError("Jina 503 Service Unavailable"))
-        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "New Broken Version Content")]):
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=1), \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "New Broken Version Content")]):
             res2 = await pipeline.ingest_book(
                 pdf_bytes=b"%PDF-1.4 mock",
                 workspace_id=ws.workspace_id,
@@ -430,7 +459,8 @@ async def test_pipeline_atomic_overwrite_success():
 
         # 1. Initial Ingest
         pipeline.embedding_client.embed_texts = AsyncMock(return_value=[[0.1] * 1024])
-        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "v1 text")]):
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=1), \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "v1 text")]):
             res1 = await pipeline.ingest_book(
                 pdf_bytes=b"%PDF-1.4 mock",
                 workspace_id=ws.workspace_id,
@@ -442,7 +472,8 @@ async def test_pipeline_atomic_overwrite_success():
 
         # 2. Overwrite succeeds
         pipeline.embedding_client.embed_texts = AsyncMock(return_value=[[0.2] * 1024, [0.3] * 1024])
-        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "v2 p1"), (2, "v2 p2")]):
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=2), \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "v2 p1"), (2, "v2 p2")]):
             res2 = await pipeline.ingest_book(
                 pdf_bytes=b"%PDF-1.4 mock",
                 workspace_id=ws.workspace_id,
@@ -478,7 +509,8 @@ async def test_pipeline_concurrent_ingest_duplicate_book_title():
 
         pipeline.embedding_client.embed_texts = slow_embed
 
-        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "Concurrent Book Content")]):
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=1), \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "Concurrent Book Content")]):
             res1, res2 = await asyncio.gather(
                 pipeline.ingest_book(
                     pdf_bytes=b"%PDF-1.4 mock",
@@ -589,7 +621,25 @@ class EBookRAGPipeline:
                     message=f"Book with title '{book_title}' already exists in workspace '{workspace_id}'. Set overwrite=true to replace."
                 )
 
-            # 3. Extract pages
+            # 3. Guardrail Page Cap Validation Gate (Fail-Fast before expensive text extraction)
+            try:
+                total_pages = PDFExtractor.get_page_count(pdf_bytes)
+            except Exception as e:
+                return IngestionResult(
+                    status=IngestionStatus.FAILED,
+                    error_code="ERR_PDF_EXTRACTION_FAILED",
+                    message=f"Failed to read PDF structure: {str(e)}"
+                )
+
+            is_valid_count, count_error = self.validator.validate_page_count(total_pages)
+            if not is_valid_count:
+                return IngestionResult(
+                    status=IngestionStatus.REJECTED,
+                    error_code=count_error,
+                    message=f"Document contains {total_pages} pages, exceeding maximum limit of {self.config.max_pages_per_book}."
+                )
+
+            # 4. Extract pages text (only for documents within page limit)
             try:
                 pages = PDFExtractor.extract_pages(pdf_bytes)
             except Exception as e:
@@ -599,15 +649,7 @@ class EBookRAGPipeline:
                     message=f"Failed to extract PDF: {str(e)}"
                 )
 
-            # 4. Guardrails & Validation Gate
-            is_valid_count, count_error = self.validator.validate_page_count(len(pages))
-            if not is_valid_count:
-                return IngestionResult(
-                    status=IngestionStatus.REJECTED,
-                    error_code=count_error,
-                    message=f"Document contains {len(pages)} pages, exceeding maximum limit of {self.config.max_pages_per_book}."
-                )
-
+            # 5. Scan Detection Gate
             pages_text = [p[1] for p in pages]
             is_valid_text, text_error = self.validator.validate_text_layer(pages_text)
             if not is_valid_text:
@@ -617,7 +659,7 @@ class EBookRAGPipeline:
                     message="Scanned PDF format without valid text layer is not supported in MVP baseline."
                 )
 
-            # 5. Flat-Window Chunking (Always generate fresh new_book_id for Blue-Green staged swap)
+            # 6. Flat-Window Chunking (Always generate fresh new_book_id for Blue-Green staged swap)
             new_book_id = f"bk_{uuid.uuid4().hex[:8]}"
             chunks = self.chunker.chunk_pages(
                 pages=pages,
@@ -640,7 +682,7 @@ class EBookRAGPipeline:
                     message=f"Chunk count {len(chunks)} exceeds maximum limit of {self.config.max_chunks_per_book}."
                 )
 
-            # 6. Embed Chunks (Patient Retry Profile)
+            # 7. Concurrent Batch Embedding (Patient Retry Profile with Semaphore Throttling)
             chunk_texts = [c.text_content for c in chunks]
             try:
                 vectors = await self.embedding_client.embed_texts(chunk_texts)
@@ -651,7 +693,7 @@ class EBookRAGPipeline:
                     message=f"Failed to embed chunks after retry: {str(e)}"
                 )
 
-            # 7. Index into Scoped Vector Store under new_book_id
+            # 8. Index into Scoped Vector Store under new_book_id
             try:
                 self.vector_store.add_chunks(chunks, vectors)
             except Exception as e:
@@ -666,7 +708,7 @@ class EBookRAGPipeline:
                     message=f"Failed to persist vector records: {str(e)}"
                 )
 
-            # 8. Atomic Swap & Cleanup of Old Book (only after new book is fully embedded & stored)
+            # 9. Atomic Swap & Cleanup of Old Book (only after new book is fully embedded & stored)
             if existing_book and overwrite:
                 try:
                     self.vector_store.delete_by_book(existing_book.book_id)
@@ -674,7 +716,7 @@ class EBookRAGPipeline:
                 except Exception:
                     pass
 
-            # 9. Register New Book Metadata
+            # 10. Register New Book Metadata
             book_meta = BookMetadata(
                 book_id=new_book_id,
                 workspace_id=workspace_id,
@@ -703,6 +745,7 @@ class EBookRAGPipeline:
         query_text: str,
         top_k: Optional[int] = None
     ) -> QueryResult:
+        """Execute workspace-scoped query with hard SLA timeout budget enforcement."""
         start_time = time.time()
         try:
             return await asyncio.wait_for(
@@ -849,3 +892,20 @@ Expected: PASS
 git add src/exocort/pipeline.py tests/test_e2e_pipeline.py
 git commit -m "feat(phase-3): add end-to-end EBookRAGPipeline with resilience, deduplication and graceful degradation"
 ```
+
+---
+
+## Test Strategy
+
+| Task | Component | Test Type | Goal |
+|---|---|---|---|
+| Task 1 | DeepSeek Generation Client | Unit / Mock Test | Verify prompt augmentation, OpenRouter LLM calling, citation extraction, token telemetry, and fast agile retry. |
+| Task 2 | End-to-End Pipeline Orchestrator | Integration / Concurrency Test | Verify full ingestion flow, deduplication & atomic overwrite preservation, fail-fast page cap validation before text extraction, query execution, partial fallback on LLM failure, and hard timeout budget enforcement (`ERR_QUERY_TIMEOUT`). |
+
+## Definition of Done (DoD)
+
+- [ ] 100% unit and integration tests pass with `uv run pytest`.
+- [ ] Fail-fast cost guardrail rejects oversized PDFs (> 1,000 pages) before text extraction via `PDFExtractor.get_page_count`.
+- [ ] Hard timeout budget (`query_total_timeout_budget = 8.0s`) is strictly enforced via `asyncio.wait_for()`, returning `ERR_QUERY_TIMEOUT` and preventing SLA P99 breaches.
+- [ ] Graceful degradation returns `status=PARTIAL` with extracted citations when LLM generation fails after fast retries.
+- [ ] Deduplication with `overwrite=False` rejects duplicate titles (`ERR_DUPLICATE_BOOK_TITLE`), while `overwrite=True` performs atomic replacement without losing existing data upon failure.
