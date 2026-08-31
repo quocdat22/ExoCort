@@ -96,6 +96,50 @@ def test_persistence_survives_reload(tmp_path):
     # Reload from disk
     store2 = ScopedVectorStore(persist_dir=chroma_dir)
     assert store2.count() == 1
+
+
+def test_delete_by_book_decrements_count_exact(tmp_path):
+    store = ScopedVectorStore(persist_dir=str(tmp_path / "chroma"))
+
+    # Book 1 has 3 chunks in ws_1
+    b1_chunks = [
+        Chunk(
+            chunk_id=f"c_b1_{i}", book_id="b1", book_title="Clean Code",
+            workspace_id="ws_1", page_start=i, page_end=i,
+            text_content=f"Clean code content {i}", chunk_index=i
+        )
+        for i in range(3)
+    ]
+    b1_vectors = [[0.1 * (i + 1)] + [0.0] * 1023 for i in range(3)]
+
+    # Book 2 has 2 chunks in ws_1
+    b2_chunks = [
+        Chunk(
+            chunk_id=f"c_b2_{i}", book_id="b2", book_title="Refactoring",
+            workspace_id="ws_1", page_start=i, page_end=i,
+            text_content=f"Refactoring content {i}", chunk_index=i
+        )
+        for i in range(2)
+    ]
+    b2_vectors = [[0.5 * (i + 1)] + [0.0] * 1023 for i in range(2)]
+
+    store.add_chunks(b1_chunks, b1_vectors)
+    store.add_chunks(b2_chunks, b2_vectors)
+
+    # Initial state: 3 + 2 = 5 chunks
+    assert store.count() == 5
+
+    # Delete Book 1 (3 chunks)
+    store.delete_by_book("b1")
+
+    # Invariant check: count must decrement by exactly 3, leaving 2 chunks
+    assert store.count() == 2
+
+    # Querying ws_1 must return ONLY Book 2 chunks
+    results = store.search_scoped(workspace_id="ws_1", query_vector=[0.5] + [0.0] * 1023, top_k=5)
+    assert len(results) == 2
+    assert all(c.book_id == "b2" for c, _ in results)
+    assert all(c.book_id != "b1" for c, _ in results)
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -331,7 +375,8 @@ Expected: FAIL with `ModuleNotFoundError`
 import asyncio
 from typing import List
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential, wait_fixed
+from pydantic import SecretStr
+from tenacity import retry, stop_after_attempt, wait_exponential, wait_random, wait_fixed
 from exocort.core.config import RAGConfig
 
 class JinaEmbeddingClient:
@@ -340,22 +385,22 @@ class JinaEmbeddingClient:
     def __init__(self, config: RAGConfig):
         self.config = config
         self.model = config.embedding_model
-        self.api_key = (
-            config.jina_api_key.get_secret_value()
-            if hasattr(config.jina_api_key, "get_secret_value")
-            else str(config.jina_api_key)
+        self.api_key: SecretStr = (
+            config.jina_api_key
+            if isinstance(config.jina_api_key, SecretStr)
+            else SecretStr(str(config.jina_api_key))
         )
-        if not self.api_key:
+        if not self.api_key.get_secret_value():
             raise ValueError("ERR_MISSING_API_KEY: JINA_API_KEY must be provided.")
         self.batch_size = config.embedding_batch_size
         self.api_url = "https://api.jina.ai/v1/embeddings"
         self.semaphore = asyncio.Semaphore(config.max_concurrent_embedding_batches)
 
-    @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=2, max=30))
+    @retry(stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=2, max=30) + wait_random(0, 2))
     async def _embed_batch_patient(self, texts: List[str]) -> List[List[float]]:
         """Patient retry profile for offline batch ingestion with semaphore-regulated concurrency."""
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self.api_key.get_secret_value()}",
             "Content-Type": "application/json"
         }
         async with self.semaphore:
@@ -372,7 +417,7 @@ class JinaEmbeddingClient:
     async def embed_query(self, query: str) -> List[float]:
         """Fast agile profile for interactive query-time search."""
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self.api_key.get_secret_value()}",
             "Content-Type": "application/json"
         }
         async with httpx.AsyncClient(timeout=self.config.query_embedding_timeout) as client:

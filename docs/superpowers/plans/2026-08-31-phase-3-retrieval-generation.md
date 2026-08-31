@@ -134,6 +134,7 @@ Expected: FAIL with `ModuleNotFoundError`
 # src/exocort/generation/deepseek_client.py
 from typing import Dict, List, Tuple
 import httpx
+from pydantic import SecretStr
 from tenacity import retry, stop_after_attempt, wait_fixed
 from exocort.core.models import Chunk, Citation
 from exocort.core.config import RAGConfig
@@ -146,12 +147,12 @@ class DeepSeekGenerator:
         self.model = config.llm_model
         self.temperature = config.llm_temperature
         self.max_tokens = config.llm_max_tokens
-        self.api_key = (
-            config.openrouter_api_key.get_secret_value()
-            if hasattr(config.openrouter_api_key, "get_secret_value")
-            else str(config.openrouter_api_key)
+        self.api_key: SecretStr = (
+            config.openrouter_api_key
+            if isinstance(config.openrouter_api_key, SecretStr)
+            else SecretStr(str(config.openrouter_api_key))
         )
-        if not self.api_key:
+        if not self.api_key.get_secret_value():
             raise ValueError("ERR_MISSING_API_KEY: OPENROUTER_API_KEY must be provided.")
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
 
@@ -203,7 +204,7 @@ class DeepSeekGenerator:
 
         prompt = self.build_augmented_prompt(query, retrieved_chunks)
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {self.api_key.get_secret_value()}",
             "Content-Type": "application/json"
         }
         payload = {
@@ -491,6 +492,74 @@ async def test_pipeline_atomic_overwrite_success():
         assert pipeline.vector_store.count() == 2
 
 @pytest.mark.asyncio
+async def test_pipeline_overwrite_chunk_count_invariant_with_multiple_books():
+    """Verify that replacing a multi-chunk book decrements old chunks and adds new chunks exactly without affecting other books."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = RAGConfig(
+            min_text_density_per_page=10,
+            chroma_persist_dir=tmpdir,
+            jina_api_key=SecretStr("mock_jina_key"),
+            openrouter_api_key=SecretStr("mock_openrouter_key"),
+        )
+        pipeline = EBookRAGPipeline(config)
+        ws = pipeline.workspace_mgr.create_workspace(name="MultiBookWS")
+
+        # 1. Ingest Book A (3 chunks)
+        pipeline.embedding_client.embed_texts = AsyncMock(return_value=[[0.1] * 1024, [0.2] * 1024, [0.3] * 1024])
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=3), \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "p1"), (2, "p2"), (3, "p3")]):
+            res_a1 = await pipeline.ingest_book(
+                pdf_bytes=b"%PDF-1.4 mock A",
+                workspace_id=ws.workspace_id,
+                book_title="Book A",
+                overwrite=False
+            )
+            assert res_a1.status == IngestionStatus.COMPLETED
+            old_book_a_id = res_a1.book_id
+            assert pipeline.vector_store.count() == 3
+
+        # 2. Ingest Book B (2 chunks)
+        pipeline.embedding_client.embed_texts = AsyncMock(return_value=[[0.5] * 1024, [0.6] * 1024])
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=2), \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "b_p1"), (2, "b_p2")]):
+            res_b = await pipeline.ingest_book(
+                pdf_bytes=b"%PDF-1.4 mock B",
+                workspace_id=ws.workspace_id,
+                book_title="Book B",
+                overwrite=False
+            )
+            assert res_b.status == IngestionStatus.COMPLETED
+            book_b_id = res_b.book_id
+            # Total chunks before overwrite: 3 + 2 = 5
+            assert pipeline.vector_store.count() == 5
+
+        # 3. Overwrite Book A with new version having 4 chunks
+        pipeline.embedding_client.embed_texts = AsyncMock(return_value=[[0.7] * 1024, [0.8] * 1024, [0.9] * 1024, [0.95] * 1024])
+        with patch("exocort.ingestion.extractor.PDFExtractor.get_page_count", return_value=4), \
+             patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[(1, "v2_p1"), (2, "v2_p2"), (3, "v2_p3"), (4, "v2_p4")]):
+            res_a2 = await pipeline.ingest_book(
+                pdf_bytes=b"%PDF-1.4 mock A v2",
+                workspace_id=ws.workspace_id,
+                book_title="Book A",
+                overwrite=True
+            )
+            assert res_a2.status == IngestionStatus.COMPLETED
+            assert res_a2.book_id != old_book_a_id
+
+        # 4. Strict Invariant Check: count must be exactly initial (5) - old_chunks (3) + new_chunks (4) = 6
+        assert pipeline.vector_store.count() == 6
+
+        # 5. Verify old Book A chunks are completely deleted
+        all_results = pipeline.vector_store.search_scoped(ws.workspace_id, query_vector=[0.1] * 1024, top_k=10)
+        assert len(all_results) == 6
+        # Zero chunks belonging to old_book_a_id
+        assert all(c.book_id != old_book_a_id for c, _ in all_results)
+        # Exactly 4 chunks for new Book A
+        assert sum(1 for c, _ in all_results if c.book_id == res_a2.book_id) == 4
+        # Exactly 2 chunks for Book B
+        assert sum(1 for c, _ in all_results if c.book_id == book_b_id) == 2
+
+@pytest.mark.asyncio
 async def test_pipeline_concurrent_ingest_duplicate_book_title():
     with tempfile.TemporaryDirectory() as tmpdir:
         config = RAGConfig(
@@ -579,7 +648,9 @@ class EBookRAGPipeline:
         self.config = config or RAGConfig()
         if validate_keys:
             self.config.validate_api_keys()
-        self.workspace_mgr = WorkspaceManager()
+        self.workspace_mgr = WorkspaceManager(
+            db_path=f"{self.config.chroma_persist_dir}/metadata.db"
+        )
         self.validator = PDFValidator(self.config)
         self.chunker = FlatWindowChunker(self.config)
         self.embedding_client = JinaEmbeddingClient(self.config)
@@ -660,7 +731,7 @@ class EBookRAGPipeline:
                 )
 
             # 6. Flat-Window Chunking (Always generate fresh new_book_id for Blue-Green staged swap)
-            new_book_id = f"bk_{uuid.uuid4().hex[:8]}"
+            new_book_id = f"bk_{uuid.uuid4().hex[:12]}"
             chunks = self.chunker.chunk_pages(
                 pages=pages,
                 workspace_id=workspace_id,

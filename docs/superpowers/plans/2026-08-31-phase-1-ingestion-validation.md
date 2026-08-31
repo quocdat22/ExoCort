@@ -158,7 +158,7 @@ def test_rag_config_defaults():
 
 def test_rag_config_api_key_validation():
     # Empty keys should fail validate_api_keys
-    config = RAGConfig()
+    config = RAGConfig(_env_file=None)
     with pytest.raises(ValueError, match="ERR_MISSING_API_KEY"):
         config.validate_api_keys()
 
@@ -168,6 +168,14 @@ def test_rag_config_api_key_validation():
         openrouter_api_key=SecretStr("mock_openrouter_key")
     )
     config_valid.validate_api_keys()
+
+def test_rag_config_loads_from_env_file(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("JINA_API_KEY=env_jina_secret\nOPENROUTER_API_KEY=env_openrouter_secret\nCHUNK_SIZE=256\n")
+    config = RAGConfig(_env_file=str(env_file))
+    assert config.jina_api_key.get_secret_value() == "env_jina_secret"
+    assert config.openrouter_api_key.get_secret_value() == "env_openrouter_secret"
+    assert config.chunk_size == 256
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -180,9 +188,15 @@ Expected: FAIL with `ModuleNotFoundError`
 ```python
 # src/exocort/core/config.py
 from pydantic import SecretStr
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class RAGConfig(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
     # Ingestion & Validation Guardrails
     chunk_size: int = 512
     chunk_overlap: int = 50
@@ -241,7 +255,7 @@ class RAGConfig(BaseSettings):
 
 ```python
 # src/exocort/core/models.py
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -260,7 +274,7 @@ class Workspace(BaseModel):
     workspace_id: str
     name: str
     description: Optional[str] = ""
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class BookMetadata(BaseModel):
     book_id: str
@@ -269,7 +283,7 @@ class BookMetadata(BaseModel):
     total_pages: int
     file_format: str = "PDF"
     total_chunks: int = 0
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 class Chunk(BaseModel):
     chunk_id: str
@@ -349,7 +363,7 @@ from exocort.workspace.manager import WorkspaceManager
 from exocort.core.models import BookMetadata
 
 def test_workspace_manager_crud():
-    mgr = WorkspaceManager()
+    mgr = WorkspaceManager(db_path=":memory:")
     ws = mgr.create_workspace(name="AI Engineering", description="LLM & RAG Books")
     assert ws.workspace_id is not None
     assert ws.name == "AI Engineering"
@@ -363,7 +377,7 @@ def test_workspace_manager_crud():
     assert fetched.name == "AI Engineering"
 
 def test_workspace_book_assignment_and_deduplication():
-    mgr = WorkspaceManager()
+    mgr = WorkspaceManager(db_path=":memory:")
     ws = mgr.create_workspace(name="Systems")
     book1 = BookMetadata(
         book_id="bk_001",
@@ -383,6 +397,28 @@ def test_workspace_book_assignment_and_deduplication():
     removed = mgr.remove_book(workspace_id=ws.workspace_id, book_id="bk_001")
     assert removed is True
     assert mgr.get_book_by_title(workspace_id=ws.workspace_id, title="Design Patterns") is None
+
+def test_workspace_manager_persistence_across_instances(tmp_path):
+    db_file = str(tmp_path / "metadata.db")
+    mgr1 = WorkspaceManager(db_path=db_file)
+    ws = mgr1.create_workspace(name="Persisted WS", description="Testing disk persistence")
+    book = BookMetadata(
+        book_id="bk_persisted_1",
+        workspace_id=ws.workspace_id,
+        title="Operating Systems",
+        total_pages=500
+    )
+    assert mgr1.assign_book(ws.workspace_id, book) is True
+
+    # Reconnect with a new instance simulating process restart
+    mgr2 = WorkspaceManager(db_path=db_file)
+    fetched_ws = mgr2.get_workspace(ws.workspace_id)
+    assert fetched_ws is not None
+    assert fetched_ws.name == "Persisted WS"
+
+    fetched_book = mgr2.get_book_by_title(ws.workspace_id, "operating systems")
+    assert fetched_book is not None
+    assert fetched_book.book_id == "bk_persisted_1"
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -394,55 +430,170 @@ Expected: FAIL with `ModuleNotFoundError`
 
 ```python
 # src/exocort/workspace/manager.py
+import sqlite3
 import uuid
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional
 from exocort.core.models import Workspace, BookMetadata
 
 class WorkspaceManager:
-    """In-memory workspace manager for baseline MVP.
+    """SQLite-backed workspace and book metadata manager.
     
-    Note: Workspace and book metadata are held in RAM for the MVP baseline.
-    Persistent storage (e.g. SQLite/RDBMS) is planned for subsequent iterations.
+    Provides ACID persistence across service/process restarts.
+    Pass db_path=":memory:" for isolated in-memory unit testing.
     """
-    def __init__(self):
-        self._workspaces: Dict[str, Workspace] = {}
-        self._books: Dict[str, Dict[str, BookMetadata]] = {}  # {workspace_id: {book_id: BookMetadata}}
+    def __init__(self, db_path: str = "./chroma_data/metadata.db"):
+        self.db_path = db_path
+        if db_path != ":memory:":
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _init_db(self) -> None:
+        with self._get_connection() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    workspace_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS books (
+                    book_id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    total_pages INTEGER NOT NULL,
+                    file_format TEXT NOT NULL,
+                    ingestion_status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+                )
+            """)
+            conn.commit()
 
     def create_workspace(self, name: str, description: str = "") -> Workspace:
-        ws_id = f"ws_{uuid.uuid4().hex[:8]}"
-        ws = Workspace(workspace_id=ws_id, name=name, description=description)
-        self._workspaces[ws_id] = ws
-        self._books[ws_id] = {}
-        return ws
+        now = datetime.now(timezone.utc)
+        with self._get_connection() as conn:
+            for _ in range(5):
+                ws_id = f"ws_{uuid.uuid4().hex[:12]}"
+                try:
+                    conn.execute(
+                        "INSERT INTO workspaces (workspace_id, name, description, created_at) VALUES (?, ?, ?, ?)",
+                        (ws_id, name, description, now.isoformat()),
+                    )
+                    conn.commit()
+                    return Workspace(workspace_id=ws_id, name=name, description=description, created_at=now)
+                except sqlite3.IntegrityError:
+                    continue
+            raise RuntimeError("ERR_WORKSPACE_COLLISION: Failed to allocate unique workspace_id after retries.")
 
     def get_workspace(self, workspace_id: str) -> Optional[Workspace]:
-        return self._workspaces.get(workspace_id)
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT workspace_id, name, description, created_at FROM workspaces WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+            if row:
+                return Workspace(
+                    workspace_id=row["workspace_id"],
+                    name=row["name"],
+                    description=row["description"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+        return None
 
     def list_workspaces(self) -> List[Workspace]:
-        return list(self._workspaces.values())
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT workspace_id, name, description, created_at FROM workspaces ORDER BY created_at ASC"
+            ).fetchall()
+            return [
+                Workspace(
+                    workspace_id=row["workspace_id"],
+                    name=row["name"],
+                    description=row["description"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in rows
+            ]
 
     def assign_book(self, workspace_id: str, book: BookMetadata) -> bool:
-        if workspace_id not in self._workspaces:
+        if not self.get_workspace(workspace_id):
             return False
-        self._books[workspace_id][book.book_id] = book
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO books 
+                (book_id, workspace_id, title, total_pages, file_format, ingestion_status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    book.book_id,
+                    workspace_id,
+                    book.title,
+                    book.total_pages,
+                    book.file_format,
+                    book.ingestion_status.value if hasattr(book.ingestion_status, "value") else str(book.ingestion_status),
+                    book.created_at.isoformat(),
+                ),
+            )
+            conn.commit()
         return True
 
     def get_book_by_title(self, workspace_id: str, title: str) -> Optional[BookMetadata]:
         normalized_title = title.strip().lower()
-        ws_books = self._books.get(workspace_id, {})
-        for book in ws_books.values():
-            if book.title.strip().lower() == normalized_title:
-                return book
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT book_id, workspace_id, title, total_pages, file_format, ingestion_status, created_at FROM books WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+            for row in rows:
+                if row["title"].strip().lower() == normalized_title:
+                    return BookMetadata(
+                        book_id=row["book_id"],
+                        workspace_id=row["workspace_id"],
+                        title=row["title"],
+                        total_pages=row["total_pages"],
+                        file_format=row["file_format"],
+                        ingestion_status=row["ingestion_status"],
+                        created_at=datetime.fromisoformat(row["created_at"]),
+                    )
         return None
 
     def remove_book(self, workspace_id: str, book_id: str) -> bool:
-        if workspace_id in self._books and book_id in self._books[workspace_id]:
-            del self._books[workspace_id][book_id]
-            return True
-        return False
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM books WHERE workspace_id = ? AND book_id = ?",
+                (workspace_id, book_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
 
     def list_workspace_books(self, workspace_id: str) -> List[BookMetadata]:
-        return list(self._books.get(workspace_id, {}).values())
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT book_id, workspace_id, title, total_pages, file_format, ingestion_status, created_at FROM books WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchall()
+            return [
+                BookMetadata(
+                    book_id=row["book_id"],
+                    workspace_id=row["workspace_id"],
+                    title=row["title"],
+                    total_pages=row["total_pages"],
+                    file_format=row["file_format"],
+                    ingestion_status=row["ingestion_status"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                )
+                for row in rows
+            ]
 ```
 
 - [ ] **Step 4: Run test using uv to verify it passes**
@@ -655,19 +806,22 @@ class FlatWindowChunker:
         chunks: List[Chunk] = []
         chunk_idx = 0
         start = 0
+        current_char_start = 0
+        step = max(1, self.chunk_size - self.chunk_overlap)
+
         while start < len(tokens):
             end = min(start + self.chunk_size, len(tokens))
             chunk_tokens = tokens[start:end]
             chunk_text = self.enc.decode(chunk_tokens)
 
-            chunk_char_start = len(self.enc.decode(tokens[:start])) if start > 0 else 0
+            chunk_char_start = current_char_start
             chunk_char_end = chunk_char_start + len(chunk_text)
             page_start, page_end = self._find_page_range(
                 chunk_char_start, chunk_char_end, page_map
             )
 
             chunks.append(Chunk(
-                chunk_id=f"chk_{uuid.uuid4().hex[:10]}",
+                chunk_id=f"chk_{uuid.uuid4().hex[:12]}",
                 book_id=book_id,
                 book_title=book_title,
                 workspace_id=workspace_id,
@@ -680,7 +834,11 @@ class FlatWindowChunker:
 
             if end >= len(tokens):
                 break
-            start += max(1, self.chunk_size - self.chunk_overlap)
+
+            # O(N) optimization: advance cumulative char offset by decoding only the non-overlapping step tokens
+            step_tokens = tokens[start : start + step]
+            current_char_start += len(self.enc.decode(step_tokens))
+            start += step
             chunk_idx += 1
 
         return chunks

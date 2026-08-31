@@ -107,9 +107,9 @@ erDiagram
   - Cung cấp cơ chế xóa sạch triệt để theo sách `delete_by_book(book_id)` để phục vụ dọn dẹp vector cũ sau khi hoàn tất Atomic Replacement (Stage & Swap) khi ghi đè sách.
 
 * **Tầng Quản trị Metadata (Workspace & Book Metadata)**:
-  - **Baseline MVP**: Được quản lý **In-Memory** (`WorkspaceManager` lưu trữ danh mục `Workspace` và `BookMetadata` qua `dict` trong RAM) để tối giản phạm vi và độ phức tạp khởi đầu.
-  - **Lưu ý Kiến trúc & Rủi ro Dữ liệu Mồ côi (Architectural Note & Orphan Data Risk)**: Do metadata quản lý không được lưu xuống đĩa trong giai đoạn MVP, khi service/process khởi động lại, danh sách Workspace/Book trong RAM sẽ bị xóa sạch trong khi các bản ghi vector tương ứng vẫn tồn tại trong ChromaDB.
-  - **Hướng xử lý & Lộ trình (Roadmap Evolution)**: Ở Vòng lặp tiếp theo, hệ thống sẽ bổ sung cơ chế Persistence cho metadata quản lý (ví dụ: SQLite hoặc RDBMS) để đảm bảo tính đồng bộ bền vững hoàn toàn giữa tầng Quan hệ và tầng Vector Store.
+  - **Baseline MVP**: Được quản lý và lưu trữ bền vững qua **SQLite Persistent Storage** (`WorkspaceManager` lưu trữ danh mục `Workspace` và `BookMetadata` tại `./chroma_data/metadata.db`, có hỗ trợ `:memory:` cho kiểm thử độc lập).
+  - **Đồng bộ Vòng đời & Triệt tiêu Dữ liệu Mồ côi**: Đồng bộ 100% vòng đời dữ liệu giữa tầng Quản trị Metadata và ChromaDB. Sau khi restart service hoặc process, toàn bộ thông tin Workspace và BookMetadata được nạp lại tức thì, đảm bảo các API `query_workspace` không bị trả lỗi `ERR_WORKSPACE_NOT_FOUND` và loại bỏ hoàn toàn rủi ro dữ liệu vector bị cô lập/mồ côi.
+  - **Lộ trình Mở rộng (Roadmap Evolution)**: Khi hệ thống mở rộng đa người dùng / microservices quy mô lớn ở các vòng lặp sau, tầng SQLite có thể chuyển đổi trong suốt sang PostgreSQL/RDBMS mà không làm thay đổi hợp đồng giao diện của `WorkspaceManager`.
 
 ---
 
