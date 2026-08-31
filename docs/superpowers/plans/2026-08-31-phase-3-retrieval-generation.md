@@ -108,6 +108,7 @@ async def test_deepseek_generate_response_mock():
         assert citations[0].book_title == "Clean Code"
         assert citations[0].page_start == 45
         assert citations[0].page_end == 45
+        assert citations[0].text_content == "Names should reveal intent."
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -191,7 +192,8 @@ class DeepSeekGenerator:
                 book_title=chunk.book_title,
                 page_start=chunk.page_start,
                 page_end=chunk.page_end,
-                relevance_score=round(score, 4)
+                relevance_score=round(score, 4),
+                text_content=chunk.text_content,
             )
             for chunk, score in retrieved_chunks
         ]

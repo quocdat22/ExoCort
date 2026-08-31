@@ -107,6 +107,17 @@ def test_chunk_metadata_binding():
     assert chunk.page_end == 16
     assert chunk.workspace_id == "ws_01"
 
+def test_citation_model():
+    cit = Citation(
+        book_title="Clean Code",
+        page_start=15,
+        page_end=16,
+        relevance_score=0.95,
+        text_content="Functions should do one thing."
+    )
+    assert cit.book_title == "Clean Code"
+    assert cit.text_content == "Functions should do one thing."
+
 def test_ingestion_result_rejected_scan():
     res = IngestionResult(
         status=IngestionStatus.REJECTED,
@@ -193,6 +204,7 @@ class Citation(BaseModel):
     page_start: int
     page_end: int
     relevance_score: float
+    text_content: Optional[str] = None
 
 class QueryResult(BaseModel):
     query: str

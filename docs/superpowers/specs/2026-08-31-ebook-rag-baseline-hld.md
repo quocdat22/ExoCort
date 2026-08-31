@@ -277,13 +277,15 @@ QueryWorkspace(workspace_id: string, query_text: string, top_k: integer = 5)
       "book_title": "Design Patterns: Elements of Reusable Object-Oriented Software",
       "page_start": 87,
       "page_end": 88,
-      "relevance_score": 0.91
+      "relevance_score": 0.91,
+      "text_content": "The Factory Method pattern defines an interface for creating an object, but lets subclasses decide which class to instantiate..."
     },
     {
       "book_title": "Design Patterns: Elements of Reusable Object-Oriented Software",
       "page_start": 107,
       "page_end": 107,
-      "relevance_score": 0.88
+      "relevance_score": 0.88,
+      "text_content": "Abstract Factory provides an interface for creating families of related or dependent objects without specifying their concrete classes..."
     }
   ],
   "metrics": {

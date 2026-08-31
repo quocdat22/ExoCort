@@ -110,13 +110,13 @@ from exocort.core.models import Citation
 
 def test_recall_at_k_hit():
     citations = [
-        Citation(book_title="Book A", page_start=135, page_end=140, relevance_score=0.9)
+        Citation(book_title="Book A", page_start=135, page_end=140, relevance_score=0.9, text_content="SRP excerpt")
     ]
     assert recall_at_k(citations, expected_page=138) is True
 
 def test_recall_at_k_miss():
     citations = [
-        Citation(book_title="Book A", page_start=10, page_end=12, relevance_score=0.8)
+        Citation(book_title="Book A", page_start=10, page_end=12, relevance_score=0.8, text_content="Intro excerpt")
     ]
     assert recall_at_k(citations, expected_page=138) is False
 
@@ -249,13 +249,20 @@ async def test_benchmark_runner_with_judge():
         query="What is SRP?",
         workspace_id="ws_1",
         answer="SRP states a class should have one reason to change.",
-        citations=[Citation(book_title="Clean Code", page_start=138, page_end=140, relevance_score=0.9)],
+        citations=[Citation(
+            book_title="Clean Code",
+            page_start=138,
+            page_end=140,
+            relevance_score=0.9,
+            text_content="A class should have one, and only one, reason to change.",
+        )],
         retrieval_time_ms=100.0,
         generation_time_ms=500.0,
         total_latency_ms=600.0,
     ))
 
     async def mock_judge(prompt: str) -> str:
+        assert "A class should have one, and only one, reason to change." in prompt
         return "0.95"
 
     test_cases = [
@@ -267,6 +274,7 @@ async def test_benchmark_runner_with_judge():
 
     assert report.total_test_cases == 1
     assert report.recall_at_k == 1.0
+    assert report.faithfulness_rate == 0.95
     assert report.avg_latency_ms == 600.0
     assert report.passed_threshold is True
 ```
@@ -328,8 +336,7 @@ class BenchmarkRunner:
 
             # Faithfulness via LLM-as-judge
             if self.judge_fn:
-                source_texts = []  # would need to extract from pipeline
-                # In practice, retrieve source chunks from the query result
+                source_texts = [c.text_content for c in res.citations if c.text_content]
                 faith_score = await faithfulness_llm_judge(
                     question=tc.query,
                     answer=res.answer,
@@ -393,4 +400,4 @@ git commit -m "feat(phase-4): add Phase 4 benchmark runner and evaluation report
 |---|---|---|
 | LLM-as-judge is slow or costly | Medium | Batch evaluation or use a smaller/cheaper model for evaluation. |
 | Parsing LLM judge response fails | Low | Fallback to `0.0` as implemented, ensuring failures don't crash the pipeline. |
-| `source_texts` extraction missing | Medium | Placeholder for extraction from pipeline is documented and tracked for implementation. |
+| Empty citations for faithfulness | Low | Handled gracefully when citations list or `text_content` is empty (LLM judge receives empty sources, properly scoring ungrounded responses as 0.0). |
