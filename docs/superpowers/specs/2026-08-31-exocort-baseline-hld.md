@@ -10,6 +10,7 @@ Tài liệu này đóng vai trò là **High-Level Design (HLD) & Functional Spec
 ## 2. Phạm vi & Ràng buộc Hệ thống (Scope & Constraints)
 
 * **Môi trường & Công cụ Thực thi**: Toàn bộ dự án được quản lý qua công cụ **`uv`** (Python package & environment manager).
+* **Định danh Package & Repository (`exocort`)**: Tên repository và Python package chính thức của dự án là **`exocort`** (viết tắt/bắt nguồn từ khái niệm *Exocortex* – vỏ não ngoài / hệ thống lưu trữ và khuếch đại nhận thức nhân tạo hỗ trợ con người tra cứu tri thức chuyên sâu). Toàn bộ mã nguồn được đặt trong thư mục gốc `src/exocort/` và import nhất quán dạng `from exocort...` qua tất cả các Phase.
 * **Định dạng tài liệu hỗ trợ (MVP)**:
   - Chỉ hỗ trợ định dạng **Digital PDF** (có lớp văn bản - text layer hợp lệ).
   - Ngôn ngữ tài liệu: **Tiếng Anh (English)**.
