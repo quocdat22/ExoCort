@@ -57,14 +57,14 @@ def test_scoped_vector_store_isolation(tmp_path):
         text_content="Preheat the oven.", chunk_index=0
     )
 
-    vec1 = [1.0] + [0.0] * 127  # 128-dim for testing
-    vec2 = [0.0] + [1.0] + [0.0] * 126
+    vec1 = [1.0] + [0.0] * 1023  # 1024-dim matching Jina v5 omni small
+    vec2 = [0.0] + [1.0] + [0.0] * 1022
 
     store.add_chunks([chunk_ws1], [vec1])
     store.add_chunks([chunk_ws2], [vec2])
 
     # Search in ws_1: MUST return only chunk from ws_1
-    query_vec = [0.95] + [0.05] + [0.0] * 126
+    query_vec = [0.95] + [0.05] + [0.0] * 1022
     results = store.search_scoped(workspace_id="ws_1", query_vector=query_vec, top_k=5)
 
     assert len(results) == 1
@@ -76,7 +76,7 @@ def test_scoped_vector_store_empty_workspace(tmp_path):
     store = ScopedVectorStore(persist_dir=str(tmp_path / "chroma"))
     results = store.search_scoped(
         workspace_id="non_existent",
-        query_vector=[1.0] + [0.0] * 127,
+        query_vector=[1.0] + [0.0] * 1023,
         top_k=5
     )
     assert results == []
@@ -90,7 +90,7 @@ def test_persistence_survives_reload(tmp_path):
         workspace_id="ws_1", page_start=1, page_end=1,
         text_content="Test text.", chunk_index=0
     )
-    store.add_chunks([chunk], [[1.0] + [0.0] * 127])
+    store.add_chunks([chunk], [[1.0] + [0.0] * 1023])
     assert store.count() == 1
 
     # Reload from disk
@@ -238,10 +238,10 @@ async def test_jina_client_batching():
     client = JinaEmbeddingClient(config)
 
     mock_resp_payload_1 = {
-        "data": [{"embedding": [0.1, 0.2]}, {"embedding": [0.3, 0.4]}]
+        "data": [{"embedding": [0.1] * 1024}, {"embedding": [0.3] * 1024}]
     }
     mock_resp_payload_2 = {
-        "data": [{"embedding": [0.5, 0.6]}]
+        "data": [{"embedding": [0.5] * 1024}]
     }
 
     texts = ["text1", "text2", "text3"]  # 3 items -> 2 batches (2 + 1)
@@ -254,8 +254,8 @@ async def test_jina_client_batching():
 
         embeddings = await client.embed_texts(texts)
         assert len(embeddings) == 3
-        assert embeddings[0] == [0.1, 0.2]
-        assert embeddings[2] == [0.5, 0.6]
+        assert embeddings[0] == [0.1] * 1024
+        assert embeddings[2] == [0.5] * 1024
         assert mock_post.call_count == 2
 ```
 

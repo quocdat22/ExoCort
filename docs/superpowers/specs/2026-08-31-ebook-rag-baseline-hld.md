@@ -209,6 +209,7 @@ flowchart TD
 | **Validation** | `min_text_density` | `50 chars/page` | Ngưỡng phát hiện và từ chối file PDF Scan |
 | **Validation** | `min_valid_page_ratio` | `0.5 (50%)` | Tỷ lệ trang hợp lệ tối thiểu để chấp nhận PDF |
 | **Embedding** | `model_name` | `jina-embeddings-v5-omni-small` | Mô hình trích xuất vector đặc trưng |
+| **Embedding** | `embedding_dimension` | `1024` | Số chiều vector đặc trưng do mô hình Jina sinh ra |
 | **Embedding** | `batch_size` | `32` | Số lượng chunk trong một lượt gọi API |
 | **Vector DB** | `distance_metric` | `Cosine` | Thang đo độ tương đồng góc giữa các vector |
 | **Vector DB** | `persist_dir` | `./chroma_data` | Thư mục lưu trữ ChromaDB persistent |

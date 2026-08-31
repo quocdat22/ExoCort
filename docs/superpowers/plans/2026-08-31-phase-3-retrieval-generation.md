@@ -239,14 +239,14 @@ from exocort.core.models import IngestionStatus
 @pytest.mark.asyncio
 async def test_pipeline_ingest_and_query_flow():
     with tempfile.TemporaryDirectory() as tmpdir:
-        config = RAGConfig(min_text_density_per_page=10, chroma_dir=tmpdir)
+        config = RAGConfig(min_text_density_per_page=10, chroma_persist_dir=tmpdir)
         pipeline = EBookRAGPipeline(config)
 
         # 1. Create Workspace
         ws = pipeline.workspace_mgr.create_workspace(name="DevOps")
 
         # 2. Mock Embedding & Generation
-        mock_embeddings = [[0.1, 0.2, 0.3]]
+        mock_embeddings = [[0.1] * 1024]
         pipeline.embedding_client.embed_texts = AsyncMock(return_value=mock_embeddings)
         pipeline.generator.generate_response = AsyncMock(
             return_value=("Continuous Integration is the practice of...", [])
@@ -308,10 +308,7 @@ class EBookRAGPipeline:
         self.validator = PDFValidator(self.config)
         self.chunker = FlatWindowChunker(self.config)
         self.embedding_client = JinaEmbeddingClient(self.config)
-        
-        persist_dir = getattr(self.config, 'chroma_dir', './chroma_db')
-        self.vector_store = ScopedVectorStore(persist_dir=persist_dir)
-        
+        self.vector_store = ScopedVectorStore(persist_dir=self.config.chroma_persist_dir)
         self.generator = DeepSeekGenerator(self.config)
 
     async def ingest_book(
@@ -396,7 +393,7 @@ class EBookRAGPipeline:
         # 1. Embed query
         retrieval_start = time.time()
         query_embeddings = await self.embedding_client.embed_texts([query_text])
-        query_vec = query_embeddings[0] if query_embeddings else [0.0] * 1024
+        query_vec = query_embeddings[0] if query_embeddings else [0.0] * self.config.embedding_dimension
 
         # 2. Scoped Retrieval
         retrieved_chunks = self.vector_store.search_scoped(

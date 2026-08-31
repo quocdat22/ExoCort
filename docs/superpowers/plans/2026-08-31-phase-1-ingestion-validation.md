@@ -133,6 +133,7 @@ def test_rag_config_defaults():
     assert config.chunk_overlap == 50
     assert config.min_valid_page_ratio == 0.5
     assert config.tokenizer_encoding == "cl100k_base"
+    assert config.embedding_dimension == 1024
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -153,6 +154,7 @@ class RAGConfig(BaseModel):
     min_valid_page_ratio: float = 0.5
     tokenizer_encoding: str = "cl100k_base"
     embedding_model: str = "jina-embeddings-v5-omni-small"
+    embedding_dimension: int = 1024
     embedding_batch_size: int = 32
     llm_model: str = "deepseek/deepseek-v4-flash-0731"
     llm_temperature: float = 0.1
