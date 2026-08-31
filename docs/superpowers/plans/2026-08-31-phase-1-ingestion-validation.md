@@ -155,6 +155,19 @@ def test_rag_config_defaults():
     assert config.query_generation_timeout == 5.0
     assert config.query_total_timeout_budget == 8.0
     assert isinstance(config.jina_api_key, SecretStr)
+
+def test_rag_config_api_key_validation():
+    # Empty keys should fail validate_api_keys
+    config = RAGConfig()
+    with pytest.raises(ValueError, match="ERR_MISSING_API_KEY"):
+        config.validate_api_keys()
+
+    # Valid keys should pass
+    config_valid = RAGConfig(
+        jina_api_key=SecretStr("mock_jina_key"),
+        openrouter_api_key=SecretStr("mock_openrouter_key")
+    )
+    config_valid.validate_api_keys()
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -202,6 +215,28 @@ class RAGConfig(BaseSettings):
     jina_api_key: SecretStr = SecretStr("")
     openrouter_api_key: SecretStr = SecretStr("")
     chroma_persist_dir: str = "./chroma_data"
+
+    def validate_api_keys(self) -> None:
+        """Fail-fast validation for required API keys (ERR_MISSING_API_KEY)."""
+        jina_val = (
+            self.jina_api_key.get_secret_value()
+            if hasattr(self.jina_api_key, "get_secret_value")
+            else str(self.jina_api_key)
+        )
+        openrouter_val = (
+            self.openrouter_api_key.get_secret_value()
+            if hasattr(self.openrouter_api_key, "get_secret_value")
+            else str(self.openrouter_api_key)
+        )
+        missing = []
+        if not jina_val:
+            missing.append("JINA_API_KEY")
+        if not openrouter_val:
+            missing.append("OPENROUTER_API_KEY")
+        if missing:
+            raise ValueError(
+                f"ERR_MISSING_API_KEY: Missing required API key(s): {', '.join(missing)}"
+            )
 ```
 
 ```python

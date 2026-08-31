@@ -43,7 +43,7 @@ from exocort.core.models import Chunk
 from exocort.core.config import RAGConfig
 
 def test_prompt_context_assembly():
-    config = RAGConfig()
+    config = RAGConfig(openrouter_api_key=SecretStr("mock_key"))
     generator = DeepSeekGenerator(config)
 
     chunks_with_scores = [
@@ -72,6 +72,11 @@ def test_prompt_context_assembly():
     assert "Pragmatic Programmer" in prompt
     assert "Pages: 10-11" in prompt
     assert "How should we name variables?" in prompt
+
+def test_deepseek_generator_missing_api_key():
+    config = RAGConfig(openrouter_api_key=SecretStr(""))
+    with pytest.raises(ValueError, match="ERR_MISSING_API_KEY"):
+        DeepSeekGenerator(config)
 
 @pytest.mark.asyncio
 async def test_deepseek_generate_response_mock():
@@ -146,6 +151,8 @@ class DeepSeekGenerator:
             if hasattr(config.openrouter_api_key, "get_secret_value")
             else str(config.openrouter_api_key)
         )
+        if not self.api_key:
+            raise ValueError("ERR_MISSING_API_KEY: OPENROUTER_API_KEY must be provided.")
         self.api_url = "https://openrouter.ai/api/v1/chat/completions"
 
     def build_augmented_prompt(
@@ -259,7 +266,12 @@ from exocort.core.models import IngestionStatus, QueryStatus
 @pytest.mark.asyncio
 async def test_pipeline_ingest_and_query_flow():
     with tempfile.TemporaryDirectory() as tmpdir:
-        config = RAGConfig(min_text_density_per_page=10, chroma_persist_dir=tmpdir)
+        config = RAGConfig(
+            min_text_density_per_page=10,
+            chroma_persist_dir=tmpdir,
+            jina_api_key=SecretStr("mock_jina_key"),
+            openrouter_api_key=SecretStr("mock_openrouter_key"),
+        )
         pipeline = EBookRAGPipeline(config)
 
         # 1. Create Workspace
@@ -310,7 +322,11 @@ async def test_pipeline_ingest_and_query_flow():
 @pytest.mark.asyncio
 async def test_pipeline_generation_failure_partial_fallback():
     with tempfile.TemporaryDirectory() as tmpdir:
-        config = RAGConfig(chroma_persist_dir=tmpdir)
+        config = RAGConfig(
+            chroma_persist_dir=tmpdir,
+            jina_api_key=SecretStr("mock_jina_key"),
+            openrouter_api_key=SecretStr("mock_openrouter_key"),
+        )
         pipeline = EBookRAGPipeline(config)
         ws = pipeline.workspace_mgr.create_workspace(name="AI")
 
@@ -325,6 +341,11 @@ async def test_pipeline_generation_failure_partial_fallback():
         assert query_res.status == QueryStatus.PARTIAL
         assert query_res.error_code == "ERR_UPSTREAM_GENERATION_FAILED"
         assert "tạm thời gián đoạn" in query_res.answer
+
+def test_pipeline_init_missing_api_keys_fails_fast():
+    config = RAGConfig(jina_api_key=SecretStr(""), openrouter_api_key=SecretStr(""))
+    with pytest.raises(ValueError, match="ERR_MISSING_API_KEY"):
+        EBookRAGPipeline(config)
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -359,8 +380,10 @@ from exocort.generation.deepseek_client import DeepSeekGenerator
 class EBookRAGPipeline:
     """Unified Orchestrator for E-Book RAG Engine Baseline MVP."""
 
-    def __init__(self, config: Optional[RAGConfig] = None):
+    def __init__(self, config: Optional[RAGConfig] = None, validate_keys: bool = True):
         self.config = config or RAGConfig()
+        if validate_keys:
+            self.config.validate_api_keys()
         self.workspace_mgr = WorkspaceManager()
         self.validator = PDFValidator(self.config)
         self.chunker = FlatWindowChunker(self.config)

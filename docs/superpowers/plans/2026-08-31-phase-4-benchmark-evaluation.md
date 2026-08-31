@@ -237,14 +237,20 @@ git commit -m "feat(phase-4): add evaluation metrics for recall and faithfulness
 # tests/evaluation/test_benchmark.py
 import pytest
 from unittest.mock import AsyncMock
+from pydantic import SecretStr
 from exocort.evaluation.benchmark import BenchmarkRunner, BenchmarkReport
 from exocort.evaluation.dataset import TestCase
 from exocort.pipeline import EBookRAGPipeline
+from exocort.core.config import RAGConfig
 from exocort.core.models import QueryResult, Citation
 
 @pytest.mark.asyncio
 async def test_benchmark_runner_with_judge():
-    pipeline = EBookRAGPipeline()
+    config = RAGConfig(
+        jina_api_key=SecretStr("mock_jina_key"),
+        openrouter_api_key=SecretStr("mock_openrouter_key"),
+    )
+    pipeline = EBookRAGPipeline(config)
     pipeline.query_workspace = AsyncMock(return_value=QueryResult(
         query="What is SRP?",
         workspace_id="ws_1",

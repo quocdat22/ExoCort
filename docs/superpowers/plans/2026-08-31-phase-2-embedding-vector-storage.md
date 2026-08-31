@@ -280,6 +280,11 @@ async def test_jina_client_embed_query_fast_profile():
         vec = await client.embed_query("What is inheritance?")
         assert len(vec) == 1024
         assert vec[0] == 0.9
+
+def test_jina_client_missing_api_key():
+    config = RAGConfig(jina_api_key=SecretStr(""))
+    with pytest.raises(ValueError, match="ERR_MISSING_API_KEY"):
+        JinaEmbeddingClient(config)
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -308,6 +313,8 @@ class JinaEmbeddingClient:
             if hasattr(config.jina_api_key, "get_secret_value")
             else str(config.jina_api_key)
         )
+        if not self.api_key:
+            raise ValueError("ERR_MISSING_API_KEY: JINA_API_KEY must be provided.")
         self.batch_size = config.embedding_batch_size
         self.api_url = "https://api.jina.ai/v1/embeddings"
         self.semaphore = asyncio.Semaphore(config.max_concurrent_embedding_batches)
