@@ -75,7 +75,8 @@ erDiagram
         string book_id FK
         string workspace_id FK
         string text_content
-        int page_number
+        int page_start
+        int page_end
         int token_count
         int chunk_index
     }
@@ -130,16 +131,16 @@ flowchart TD
   - `workspace_id`: Mã định danh không gian làm việc.
   - `book_title`: Tên sách.
 * **Xử lý Chức năng (Functional Processing)**:
-  1. *Validation Gate*: Đo mật độ ký tự văn bản có nghĩa trên mỗi trang. Nếu phát hiện file PDF dạng scan (không có text layer hoặc < 50 ký tự/trang), lập tức từ chối và trả về mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
-  2. *Text Extraction*: Trích xuất toàn bộ văn bản theo từng trang, lưu giữ liên kết số trang (`page_number`).
-  3. *Flat-Window Chunking*: Phân đoạn văn bản bằng cửa sổ trượt kích thước cố định:
+  1. *Validation Gate*: Đo mật độ ký tự văn bản có nghĩa trên mỗi trang. Nếu tỷ lệ trang hợp lệ (≥ 50 ký tự/trang) thấp hơn 50% tổng số trang, lập tức từ chối và trả về mã lỗi `ERR_UNSUPPORTED_SCANNED_PDF`.
+  2. *Text Extraction*: Trích xuất toàn bộ văn bản theo từng trang, lưu giữ ranh giới trang (character offset).
+  3. *Cross-page Flat-Window Chunking*: Nối toàn bộ văn bản các trang thành chuỗi liên tục, phân đoạn bằng cửa sổ trượt token-based (`tiktoken`, encoding `cl100k_base`), ánh xạ ngược vị trí trang qua character offset:
      - Kích thước khối (Chunk Size): `512 tokens`.
      - Độ gối đầu (Chunk Overlap): `50 tokens` (~10%).
-  4. *Metadata Binding*: Đóng gói mỗi chunk thành một thực thể có cấu trúc kèm thông tin định danh.
+  4. *Metadata Binding*: Đóng gói mỗi chunk thành một thực thể có cấu trúc kèm thông tin định danh, gồm `page_start` và `page_end` (hỗ trợ chunk liên trang).
 * **Đầu ra (Output)**: **Normalized Chunks Collection** (Tập hợp các chunk chuẩn hóa kèm metadata).
 * **Tiêu chí Hoàn thành (DoD)**:
   - 100% file PDF scan bị từ chối với thông báo chuẩn.
-  - 100% chunk được gán đúng `workspace_id`, `book_title`, `page_number`.
+  - 100% chunk được gán đúng `workspace_id`, `book_title`, `page_start`, `page_end`.
 
 ---
 
@@ -204,10 +205,13 @@ flowchart TD
 | :--- | :--- | :--- | :--- |
 | **Ingestion** | `chunk_size` | `512 tokens` | Kích thước phân đoạn văn bản cố định |
 | **Ingestion** | `chunk_overlap` | `50 tokens` | Độ gối đầu giữ liền mạch ngữ nghĩa giữa các chunk |
+| **Ingestion** | `tokenizer` | `cl100k_base (tiktoken)` | Bộ mã hóa token cho phân đoạn chính xác |
 | **Validation** | `min_text_density` | `50 chars/page` | Ngưỡng phát hiện và từ chối file PDF Scan |
+| **Validation** | `min_valid_page_ratio` | `0.5 (50%)` | Tỷ lệ trang hợp lệ tối thiểu để chấp nhận PDF |
 | **Embedding** | `model_name` | `jina-embeddings-v5-omni-small` | Mô hình trích xuất vector đặc trưng |
 | **Embedding** | `batch_size` | `32` | Số lượng chunk trong một lượt gọi API |
 | **Vector DB** | `distance_metric` | `Cosine` | Thang đo độ tương đồng góc giữa các vector |
+| **Vector DB** | `persist_dir` | `./chroma_data` | Thư mục lưu trữ ChromaDB persistent |
 | **Retrieval** | `top_k` | `5` | Số lượng đoạn trích liên quan nhất đưa vào Context |
 | **Generation** | `model_name` | `deepseek/deepseek-v4-flash-0731` | Mô hình sinh ngôn ngữ tự nhiên qua OpenRouter |
 | **Generation** | `temperature` | `0.1` | Thiết lập tính xác thực cao, hạn chế sáng tạo |
@@ -271,12 +275,14 @@ QueryWorkspace(workspace_id: string, query_text: string, top_k: integer = 5)
   "citations": [
     {
       "book_title": "Design Patterns: Elements of Reusable Object-Oriented Software",
-      "page_number": 87,
+      "page_start": 87,
+      "page_end": 88,
       "relevance_score": 0.91
     },
     {
       "book_title": "Design Patterns: Elements of Reusable Object-Oriented Software",
-      "page_number": 107,
+      "page_start": 107,
+      "page_end": 107,
       "relevance_score": 0.88
     }
   ],

@@ -6,16 +6,16 @@
 
 **Architecture:** Nhận truy vấn và `workspace_id` -> Vector hóa câu hỏi qua Jina -> Truy xuất Top-K từ `ScopedVectorStore` -> Đóng gói khối ngữ cảnh -> Gửi tới DeepSeek v4 Flash với quy tắc trích dẫn nghiêm ngặt -> Trả về `QueryResult` hoàn chỉnh.
 
-**Tech Stack:** `uv`, Python 3.10+, `httpx`, `pytest`, `pytest-asyncio`.
+**Tech Stack:** `uv`, Python 3.10+, `httpx`, `pytest`, `pytest-asyncio`, `tenacity`.
 
 **Spec:** `docs/superpowers/specs/2026-08-31-ebook-rag-baseline-hld.md`
 
 ## Global Constraints
 
 - **Environment & Execution**: Toàn bộ các lệnh chạy test, cài đặt dependencies và thực thi phải thông qua **`uv`** (ví dụ: `uv run pytest`).
-- **Input Hand-off**: Nhận `ScopedVectorStore` và `JinaEmbeddingClient` từ Phase 2, `PDFValidator` và `FlatWindowChunker` từ Phase 1.
+- **Input Hand-off**: Nhận `ScopedVectorStore` và `JinaEmbeddingClient` từ Phase 2, `PDFValidator` và `FlatWindowChunker` từ Phase 1. Tất cả được import từ `exocort`.
 - **LLM Model**: `deepseek/deepseek-v4-flash-0731` qua OpenRouter API.
-- **Citation Format**: Bắt buộc gắn kèm `book_title` và `page_number`.
+- **Citation Format**: Bắt buộc gắn kèm `book_title` cùng với `page_start` và `page_end`.
 - **Latency**: Tối ưu độ trễ tổng thể $\le 2.5$ giây.
 - **Output Hand-off**: Cung cấp `EBookRAGPipeline` hoàn chỉnh sẵn sàng cho việc đánh giá ở Phase 4.
 
@@ -24,7 +24,7 @@
 ### Task 1: DeepSeek Generation Client & Citation Formatter
 
 **Files:**
-- Create: `src/ebook_rag/generation/deepseek_client.py`
+- Create: `src/exocort/generation/deepseek_client.py`
 - Test: `tests/generation/test_deepseek_generation.py`
 
 **Interfaces:**
@@ -37,9 +37,9 @@
 # tests/generation/test_deepseek_generation.py
 import pytest
 from unittest.mock import AsyncMock, patch
-from src.ebook_rag.generation.deepseek_client import DeepSeekGenerator
-from src.ebook_rag.core.models import Chunk
-from src.ebook_rag.core.config import RAGConfig
+from exocort.generation.deepseek_client import DeepSeekGenerator
+from exocort.core.models import Chunk
+from exocort.core.config import RAGConfig
 
 def test_prompt_context_assembly():
     config = RAGConfig()
@@ -49,10 +49,18 @@ def test_prompt_context_assembly():
         (
             Chunk(
                 chunk_id="c1", book_id="b1", book_title="Clean Code",
-                workspace_id="ws_1", page_number=45, text_content="Names should reveal intent.",
+                workspace_id="ws_1", page_start=45, page_end=45, text_content="Names should reveal intent.",
                 chunk_index=0
             ),
             0.92
+        ),
+        (
+            Chunk(
+                chunk_id="c2", book_id="b2", book_title="Pragmatic Programmer",
+                workspace_id="ws_1", page_start=10, page_end=11, text_content="Don't repeat yourself.",
+                chunk_index=1
+            ),
+            0.85
         )
     ]
 
@@ -60,6 +68,8 @@ def test_prompt_context_assembly():
     assert "Clean Code" in prompt
     assert "Page: 45" in prompt
     assert "Names should reveal intent." in prompt
+    assert "Pragmatic Programmer" in prompt
+    assert "Pages: 10-11" in prompt
     assert "How should we name variables?" in prompt
 
 @pytest.mark.asyncio
@@ -79,7 +89,7 @@ async def test_deepseek_generate_response_mock():
         (
             Chunk(
                 chunk_id="c1", book_id="b1", book_title="Clean Code",
-                workspace_id="ws_1", page_number=45, text_content="Names should reveal intent.",
+                workspace_id="ws_1", page_start=45, page_end=45, text_content="Names should reveal intent.",
                 chunk_index=0
             ),
             0.92
@@ -96,7 +106,8 @@ async def test_deepseek_generate_response_mock():
         assert "Variable names should be descriptive" in answer
         assert len(citations) == 1
         assert citations[0].book_title == "Clean Code"
-        assert citations[0].page_number == 45
+        assert citations[0].page_start == 45
+        assert citations[0].page_end == 45
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -107,11 +118,12 @@ Expected: FAIL with `ModuleNotFoundError`
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/ebook_rag/generation/deepseek_client.py
+# src/exocort/generation/deepseek_client.py
 from typing import List, Tuple
 import httpx
-from src.ebook_rag.core.models import Chunk, Citation
-from src.ebook_rag.core.config import RAGConfig
+from tenacity import retry, stop_after_attempt, wait_exponential
+from exocort.core.models import Chunk, Citation
+from exocort.core.config import RAGConfig
 
 class DeepSeekGenerator:
     def __init__(self, config: RAGConfig):
@@ -128,9 +140,14 @@ class DeepSeekGenerator:
     ) -> str:
         context_blocks = []
         for chunk, score in retrieved_chunks:
-            context_blocks.append(
-                f"[Document: {chunk.book_title} | Page: {chunk.page_number}]\n{chunk.text_content}"
-            )
+            if chunk.page_start == chunk.page_end:
+                context_blocks.append(
+                    f"[Document: {chunk.book_title} | Page: {chunk.page_start}]\n{chunk.text_content}"
+                )
+            else:
+                context_blocks.append(
+                    f"[Document: {chunk.book_title} | Pages: {chunk.page_start}-{chunk.page_end}]\n{chunk.text_content}"
+                )
         
         context_str = "\n\n---\n\n".join(context_blocks)
         prompt = (
@@ -142,6 +159,7 @@ class DeepSeekGenerator:
         )
         return prompt
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=30))
     async def generate_response(
         self,
         query: str,
@@ -171,7 +189,8 @@ class DeepSeekGenerator:
         citations: List[Citation] = [
             Citation(
                 book_title=chunk.book_title,
-                page_number=chunk.page_number,
+                page_start=chunk.page_start,
+                page_end=chunk.page_end,
                 relevance_score=round(score, 4)
             )
             for chunk, score in retrieved_chunks
@@ -188,8 +207,8 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/ebook_rag/generation/ tests/generation/
-git commit -m "feat(phase-3): add DeepSeek generator and citation formatter"
+git add src/exocort/generation/ tests/generation/
+git commit -m "feat(phase-3): add DeepSeek generator and citation formatter for exocort"
 ```
 
 ---
@@ -197,7 +216,7 @@ git commit -m "feat(phase-3): add DeepSeek generator and citation formatter"
 ### Task 2: End-to-End EBookRAGPipeline Orchestrator
 
 **Files:**
-- Create: `src/ebook_rag/pipeline.py`
+- Create: `src/exocort/pipeline.py`
 - Test: `tests/test_e2e_pipeline.py`
 
 **Interfaces:**
@@ -209,47 +228,49 @@ git commit -m "feat(phase-3): add DeepSeek generator and citation formatter"
 ```python
 # tests/test_e2e_pipeline.py
 import pytest
+import tempfile
 from unittest.mock import AsyncMock, patch
-from src.ebook_rag.pipeline import EBookRAGPipeline
-from src.ebook_rag.core.config import RAGConfig
-from src.ebook_rag.core.models import IngestionStatus
+from exocort.pipeline import EBookRAGPipeline
+from exocort.core.config import RAGConfig
+from exocort.core.models import IngestionStatus
 
 @pytest.mark.asyncio
 async def test_pipeline_ingest_and_query_flow():
-    config = RAGConfig(min_text_density_per_page=10)
-    pipeline = EBookRAGPipeline(config)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = RAGConfig(min_text_density_per_page=10, chroma_dir=tmpdir)
+        pipeline = EBookRAGPipeline(config)
 
-    # 1. Create Workspace
-    ws = pipeline.workspace_mgr.create_workspace(name="DevOps")
+        # 1. Create Workspace
+        ws = pipeline.workspace_mgr.create_workspace(name="DevOps")
 
-    # 2. Mock Embedding & Generation
-    mock_embeddings = [[0.1, 0.2, 0.3]]
-    pipeline.embedding_client.embed_texts = AsyncMock(return_value=mock_embeddings)
-    pipeline.generator.generate_response = AsyncMock(
-        return_value=("Continuous Integration is the practice of...", [])
-    )
-
-    # 3. Ingestion
-    with patch("src.ebook_rag.ingestion.extractor.PDFExtractor.extract_pages", return_value=[
-        (1, "Continuous Integration is the practice of automating the integration of code changes.")
-    ]):
-        ingest_res = await pipeline.ingest_book(
-            pdf_bytes=b"%PDF-1.4 mock",
-            workspace_id=ws.workspace_id,
-            book_title="CI/CD Handbook"
+        # 2. Mock Embedding & Generation
+        mock_embeddings = [[0.1, 0.2, 0.3]]
+        pipeline.embedding_client.embed_texts = AsyncMock(return_value=mock_embeddings)
+        pipeline.generator.generate_response = AsyncMock(
+            return_value=("Continuous Integration is the practice of...", [])
         )
-        assert ingest_res.status == IngestionStatus.COMPLETED
-        assert ingest_res.total_pages == 1
-        assert ingest_res.total_chunks_indexed == 1
 
-    # 4. Scoped Query
-    query_res = await pipeline.query_workspace(
-        workspace_id=ws.workspace_id,
-        query_text="What is Continuous Integration?"
-    )
-    assert "Continuous Integration" in query_res.answer
-    assert query_res.workspace_id == ws.workspace_id
-    assert query_res.total_latency_ms > 0
+        # 3. Ingestion
+        with patch("exocort.ingestion.extractor.PDFExtractor.extract_pages", return_value=[
+            (1, "Continuous Integration is the practice of automating the integration of code changes.")
+        ]):
+            ingest_res = await pipeline.ingest_book(
+                pdf_bytes=b"%PDF-1.4 mock",
+                workspace_id=ws.workspace_id,
+                book_title="CI/CD Handbook"
+            )
+            assert ingest_res.status == IngestionStatus.COMPLETED
+            assert ingest_res.total_pages == 1
+            assert ingest_res.total_chunks_indexed == 1
+
+        # 4. Scoped Query
+        query_res = await pipeline.query_workspace(
+            workspace_id=ws.workspace_id,
+            query_text="What is Continuous Integration?"
+        )
+        assert "Continuous Integration" in query_res.answer
+        assert query_res.workspace_id == ws.workspace_id
+        assert query_res.total_latency_ms > 0
 ```
 
 - [ ] **Step 2: Run test using uv to verify it fails**
@@ -260,23 +281,23 @@ Expected: FAIL with `ModuleNotFoundError`
 - [ ] **Step 3: Write minimal implementation**
 
 ```python
-# src/ebook_rag/pipeline.py
+# src/exocort/pipeline.py
 import time
 import uuid
 from typing import List, Optional
-from src.ebook_rag.core.config import RAGConfig
-from src.ebook_rag.core.models import (
+from exocort.core.config import RAGConfig
+from exocort.core.models import (
     IngestionResult,
     IngestionStatus,
     QueryResult,
 )
-from src.ebook_rag.workspace.manager import WorkspaceManager
-from src.ebook_rag.ingestion.validator import PDFValidator
-from src.ebook_rag.ingestion.extractor import PDFExtractor
-from src.ebook_rag.ingestion.chunker import FlatWindowChunker
-from src.ebook_rag.embedding.jina_client import JinaEmbeddingClient
-from src.ebook_rag.storage.vector_store import ScopedVectorStore
-from src.ebook_rag.generation.deepseek_client import DeepSeekGenerator
+from exocort.workspace.manager import WorkspaceManager
+from exocort.ingestion.validator import PDFValidator
+from exocort.ingestion.extractor import PDFExtractor
+from exocort.ingestion.chunker import FlatWindowChunker
+from exocort.embedding.jina_client import JinaEmbeddingClient
+from exocort.storage.vector_store import ScopedVectorStore
+from exocort.generation.deepseek_client import DeepSeekGenerator
 
 class EBookRAGPipeline:
     def __init__(self, config: Optional[RAGConfig] = None):
@@ -285,7 +306,10 @@ class EBookRAGPipeline:
         self.validator = PDFValidator(self.config)
         self.chunker = FlatWindowChunker(self.config)
         self.embedding_client = JinaEmbeddingClient(self.config)
-        self.vector_store = ScopedVectorStore()
+        
+        persist_dir = getattr(self.config, 'chroma_dir', './chroma_db')
+        self.vector_store = ScopedVectorStore(persist_dir=persist_dir)
+        
         self.generator = DeepSeekGenerator(self.config)
 
     async def ingest_book(
@@ -408,6 +432,6 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/ebook_rag/pipeline.py tests/test_e2e_pipeline.py
-git commit -m "feat(phase-3): add end-to-end EBookRAGPipeline orchestrator"
+git add src/exocort/pipeline.py tests/test_e2e_pipeline.py
+git commit -m "feat(phase-3): add end-to-end EBookRAGPipeline orchestrator for exocort"
 ```
